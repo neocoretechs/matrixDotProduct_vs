@@ -14,7 +14,7 @@ extern "C" {
  * Method:    matrixDotProductD
  * Signature: (II[DII[D[D)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_MatrixCu_matrixDotProductD
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
   (JNIEnv *, jclass, jint, jint, jdoubleArray, jint, jint, jdoubleArray, jdoubleArray);
 
 #ifdef __cplusplus
