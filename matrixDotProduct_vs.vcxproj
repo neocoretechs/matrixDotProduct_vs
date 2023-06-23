@@ -113,7 +113,7 @@
     <ClCompile Include="matrixDotProductD.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="com_neocoretechs_neurovolve_MatrixCu.h" />
+    <ClInclude Include="com_neocoretechs_neurovolve_Matrix.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
