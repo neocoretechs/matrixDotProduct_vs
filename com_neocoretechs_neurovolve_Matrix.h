@@ -27,6 +27,13 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
 
 /*
  * Class:     com_neocoretechs_neurovolve_Matrix
+ * Method:    matrixDotProductDStream
+ * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDStream
+(JNIEnv*, jclass, jlong, jint, jint, jobject, jint, jint, jobject, jobject, jint);
+/*
+ * Class:     com_neocoretechs_neurovolve_Matrix
  * Method:    cublasHandle
  * Signature: ()J
  */
