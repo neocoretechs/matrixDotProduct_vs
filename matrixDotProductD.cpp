@@ -119,72 +119,72 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
   */
   /* Allocate device memory for the matrices */
   
-  _timespec64 start;
-  _timespec64 stop;
+  //_timespec64 start;
+  //_timespec64 stop;
  
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&start, TIME_UTC);
   //printf("CUDA malloc d_A...\n");
   cudaErr = cudaMalloc((void**)(&d_A), n1 * sizeof(d_A[0]));
   if (cudaErr != cudaSuccess) {
       printf("!!!!cublasDgemm device memory allocation error (allocate A) %s\n", cudaGetErrorString(cudaErr));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA malloc d_A/B...%d\n",(stop.tv_nsec - start.tv_nsec));
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA malloc d_A/B...%d\n",(stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&start, TIME_UTC);
   cudaErr = cudaMalloc((void**)(&d_B), n2 * sizeof(d_B[0]));
   if (cudaErr != cudaSuccess) {
     printf("!!!!cublasDgemm device memory allocation error (allocate B) %s\n", cudaGetErrorString(cudaErr));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA malloc d_B/C...%d\n", (stop.tv_nsec - start.tv_nsec));
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA malloc d_B/C...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&start, TIME_UTC);
   cudaErr = cudaMalloc((void**)(&d_C), nc * sizeof(d_C[0]));
   if (cudaErr != cudaSuccess) {
     printf("!!!!cublasDgemm device memory allocation error (allocate C) %s\n", cudaGetErrorString(cudaErr));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA malloc d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA malloc d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
   /* Initialize the device matrices with the host matrices */
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&start, TIME_UTC);
   status = cublasSetVector(n1, sizeof(h_A[0]), h_A, 1, d_A, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (write A) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA setVector d_A/B...%d\n", (stop.tv_nsec - start.tv_nsec));
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA setVector d_A/B...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&start, TIME_UTC);
   status = cublasSetVector(n2, sizeof(h_B[0]), h_B, 1, d_B, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (write B) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA setVector d_B/C...%d\n", (stop.tv_nsec - start.tv_nsec));
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA setVector d_B/C...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&start, TIME_UTC);
   status = cublasSetVector(nc, sizeof(h_C[0]), h_C, 1, d_C, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
-    printf("!!!! device access error (write C)\n");
+    printf("!!!!cublasDgemm device access error (write C) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA setVector C...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA setVector C...%d\n", (stop.tv_nsec - start.tv_nsec));
   /* Performs operation using plain C code */
  // simple_sgemm(N, alpha, h_A, h_B, beta, h_C);
  // h_C_ref = h_C;
  // printf("cublasDgemm...\n");
   /* Performs operation using cublas */
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&start, TIME_UTC);
   status = cublasDgemm((cublasHandle_t)handle, CUBLAS_OP_N, CUBLAS_OP_N, rows1, columns2, columns1, &alpha, d_A, rows1, d_B, rows2, &beta, d_C, rows1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm kernel execution error %s\n", cublasGetStatusString(status));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA cublasDgemm...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA cublasDgemm...%d\n", (stop.tv_nsec - start.tv_nsec));
   /* Allocate host memory for reading back the result from device memory
   h_C = (double *)(malloc(nc * sizeof(h_C[0])));
 
@@ -195,14 +195,14 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
   */
   /* Read the result back */
  //printf("cublasGetVector d_C...\n");
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&start, TIME_UTC);
   status = cublasGetVector(nc, sizeof(h_C[0]), d_C, 1, h_C, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (read C) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA getVector d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA getVector d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
   /* Check result against reference
   error_norm = 0;
   ref_norm = 0;
@@ -221,7 +221,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     return NULL;
   }
   */
-  _timespec64_get(&start, TIME_UTC);
+  //_timespec64_get(&start, TIME_UTC);
   //printf("set h_C/mr double array region...\n");
   env->SetDoubleArrayRegion(mr, 0, nc, h_C);
   //printf("release h_A/m1 array region...\n");
@@ -250,8 +250,8 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     printf("!!!!cublasDgemm memory free error (C) %s\n", cudaGetErrorString(cudaErr));
     return JNI_ERR;
   }
-  _timespec64_get(&stop, TIME_UTC);
-  printf("CUDA FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+  //_timespec64_get(&stop, TIME_UTC);
+  //printf("CUDA FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
   return JNI_OK;
 
   /*
@@ -274,6 +274,9 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     cublasStatus_t status;
     cudaError_t cudaErr;
 
+    // Allocate host storage for batch_count A,B,C matrices
+    double** A, ** B, ** C;
+
     double** h_A = 0;
     double** h_B = 0;
     double** h_C = 0;
@@ -294,65 +297,111 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     const int nc = rows1 * columns2;
     int i;
 
-    _timespec64 start;
-    _timespec64 stop;
+    //_timespec64 start;
+    //_timespec64 stop;
     
-    _timespec64_get(&start, TIME_UTC);
+    //_timespec64_get(&start, TIME_UTC);
 
     h_A = (double**)malloc(batchSize * sizeof(double*));
     h_B = (double**)malloc(batchSize * sizeof(double*));
     h_C = (double**)malloc(batchSize * sizeof(double*));
-    d_A = (double**)malloc(batchSize * sizeof(double*));
-    d_B = (double**)malloc(batchSize * sizeof(double*));
-    d_C = (double**)malloc(batchSize * sizeof(double*));
+    //d_A = (double**)malloc(batchSize * sizeof(double*));
+    //d_B = (double**)malloc(batchSize * sizeof(double*));
+    //d_C = (double**)malloc(batchSize * sizeof(double*));
     
     m1s = (jobject*)malloc(batchSize * sizeof(jobject));
     m2s = (jobject*)malloc(batchSize * sizeof(jobject));
     mrs = (jobject*)malloc(batchSize * sizeof(jobject));
 
+    A = (double**)malloc(batchSize * sizeof(double*));
+    B = (double**)malloc(batchSize * sizeof(double*));
+    C = (double**)malloc(batchSize * sizeof(double*));
+
     jclass aListClass = env->GetObjectClass(m1_AList);
     jmethodID alGetId = env->GetMethodID(aListClass, "get", "(I)Ljava/lang/Object;");
+
     for (i = 0; i < batchSize; i++) {
-        m1s[i] = env->CallObjectMethod(m1_AList, alGetId, i);
-        h_A[i] = env->GetDoubleArrayElements((jdoubleArray) m1s[i], NULL);
-        m2s[i] = env->CallObjectMethod(m2_AList, alGetId, i);
-        h_B[i] = env->GetDoubleArrayElements((jdoubleArray) m2s[i], NULL);
-        mrs[i] = env->CallObjectMethod(mr_AList, alGetId, i);
-        h_C[i] = env->GetDoubleArrayElements((jdoubleArray) mrs[i], NULL);
-        cudaErr = cudaMalloc((void**)(&d_A[i]), n1 * sizeof(d_A[0]));
-        if( cudaErr != cudaSuccess) {
+        cudaErr = cudaMalloc((void**)(&h_A[i]), n1 * sizeof(double));
+        if (cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched device memory allocation error (allocate A) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
-        cudaErr = cudaMalloc((void**)(&d_B[i]), n2 * sizeof(d_B[0]));
-        if( cudaErr != cudaSuccess) {
+        cudaErr = cudaMalloc((void**)(&h_B[i]), n2 * sizeof(double));
+        if (cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched device memory allocation error (allocate B) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
-        cudaErr = cudaMalloc((void**)(&d_C[i]), nc * sizeof(d_C[0]));
-        if(cudaErr != cudaSuccess) {
+        cudaErr = cudaMalloc((void**)(&h_C[i]), nc * sizeof(double));
+        if (cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched device memory allocation error (allocate C) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(n1, sizeof(h_A[0]), h_A[i], 1, d_A[i], 1);
+    }
+    //printf("cublasDgemmBatched cudaMalloc1\n");
+    // Copy the host array of device pointers to the device
+    cudaErr = cudaMalloc((void**)&d_A, batchSize * sizeof(double*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory allocation error (allocate d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMalloc((void**)&d_B, batchSize * sizeof(double*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory allocation error (allocate d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMalloc((void**)&d_C, batchSize * sizeof(double*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory allocation error (allocate d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("cublasDgemmBatched cudaMalloc2\n");
+    cudaErr = cudaMemcpy(d_A, h_A, batchSize * sizeof(double*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory copy error (copy h_A to d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMemcpy(d_B, h_B, batchSize * sizeof(double*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory copy error (copy h_B to d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMemcpy(d_C, h_C, batchSize * sizeof(double*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched device memory copy error (copy h_C to d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("cublasDgemmBatched cudaMemcpy1\n");
+    // move JNI ArrayList data to allocated memory
+    for (i = 0; i < batchSize; i++) {
+        m1s[i] = env->CallObjectMethod(m1_AList, alGetId, i);
+        A[i] = env->GetDoubleArrayElements((jdoubleArray)m1s[i], NULL);
+        m2s[i] = env->CallObjectMethod(m2_AList, alGetId, i);
+        B[i] = env->GetDoubleArrayElements((jdoubleArray)m2s[i], NULL);
+        mrs[i] = env->CallObjectMethod(mr_AList, alGetId, i);
+        C[i] = env->GetDoubleArrayElements((jdoubleArray)mrs[i], NULL);
+        //printf("cublasDgemmBatched JNI get %d\n",i);
+        status = cublasSetMatrix(rows1, columns1, sizeof(h_A[0]), A[i], rows1, h_A[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write A) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(n2, sizeof(h_B[0]), h_B[i], 1, d_B[i], 1);
+        //printf("cublasDgemmBatched setMatrix 1 %d\n", i);
+        status = cublasSetMatrix(rows2, columns2, sizeof(h_B[0]), B[i], rows2, h_B[i], rows2);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write B) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(nc, sizeof(h_C[0]), h_C[i], 1, d_C[i], 1);
+        //printf("cublasDgemmBatched setMatrix 2 %d\n", i);
+        status = cublasSetMatrix(rows1, columns2, sizeof(h_C[0]), C[i], rows1, h_C[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write C) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
+        //printf("cublasDgemmBatched setMatrix 3 %d\n", i);
     }
-
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmBatched total setup time...%d\n", (stop.tv_nsec - start.tv_nsec));
+    // perform the matrix ops
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmBatched finished setup\n");
     /*
     _timespec64_get(&start, TIME_UTC);
     //printf("CUDA malloc d_A...\n");
@@ -379,19 +428,20 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     */
    // printf("cublasDgemm...\n");
     /* Performs operation using cublas */
-    _timespec64_get(&start, TIME_UTC);
+    //_timespec64_get(&start, TIME_UTC);
     status = cublasDgemmBatched((cublasHandle_t)handle, CUBLAS_OP_N, CUBLAS_OP_N, rows1, columns2, columns1, &alpha, d_A, rows1, d_B, rows2, &beta, d_C, rows1, batchSize);
     if (status != CUBLAS_STATUS_SUCCESS) {
         printf("!!!!cublasDgemmBatched kernel execution error %s\n", cublasGetStatusString(status));
         return JNI_ERR;
     }
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmBatched...%d\n", (stop.tv_nsec - start.tv_nsec));
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmBatched...%d\n", (stop.tv_nsec - start.tv_nsec));
   
    //printf("cublasGetVector d_C...\n");
-    _timespec64_get(&start, TIME_UTC);
+   // _timespec64_get(&start, TIME_UTC);
     for (i = 0; i < batchSize; i++) {
-        status = cublasGetMatrix(rows1, columns2, sizeof(h_C[0]), d_C[i], 1, h_C[i], 1);
+        //printf("CUDA cublasDgemmBatched getVector...%d\n", i);
+        status = cublasGetMatrix(rows1, columns2, sizeof(h_C[0]), h_C[i], rows1, C[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (read C) %s for batch # %d\n", cublasGetStatusString(status),i);
             return JNI_ERR;
@@ -400,46 +450,67 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
        // printf("CUDA getVector d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
         //_timespec64_get(&start, TIME_UTC);
         //printf("set h_C/mr double array region...\n");
-        env->SetDoubleArrayRegion((jdoubleArray)mrs[i], 0, nc, h_C[i]);
-        //printf("release h_A/m1 array region...\n");
-        env->ReleaseDoubleArrayElements((jdoubleArray)m1s[i], h_A[i], JNI_ABORT);
-        //printf("release h_B/m2 array region...\n");
-        env->ReleaseDoubleArrayElements((jdoubleArray)m2s[i], h_B[i], JNI_ABORT);
-        //printf("release h_C/mr array region...\n");
-        env->ReleaseDoubleArrayElements((jdoubleArray)mrs[i], h_C[i], JNI_ABORT);
+        env->SetDoubleArrayRegion((jdoubleArray)mrs[i], 0, nc, C[i]);
+        //printf("release A/m1 array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)m1s[i], A[i], JNI_ABORT);
+        //printf("release B/m2 array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)m2s[i], B[i], JNI_ABORT);
+        //printf("release C/mr array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)mrs[i], C[i], JNI_ABORT);
 
-        cudaErr = cudaFree(d_A[i]);
+        cudaErr = cudaFree(h_A[i]);
         if(cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched memory free error (A) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
 
-        cudaErr = cudaFree(d_B[i]);
+        cudaErr = cudaFree(h_B[i]);
         if(cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched memory free error (B) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
 
-        cudaErr = cudaFree(d_C[i]);
+        cudaErr = cudaFree(h_C[i]);
         if(cudaErr != cudaSuccess) {
             printf("!!!!cublasDgemmBatched memory free error (C) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
+
     }
     /* JNI cleanup */
+    //printf("delete local class ref...\n");
     env->DeleteLocalRef(aListClass);
     /* Pointer Memory clean up */
+    //printf("free pointers A B C...\n");
+    free(A);
+    free(B);
+    free(C);
+    //printf("free pointers h_A h_B h_C...\n");
     free(h_A);
     free(h_B);
     free(h_C);
-    free(d_A);
-    free(d_B);
-    free(d_C);
+    //printf("free pointers d_A d_B d_C...\n");
+    cudaErr = cudaFree(d_A);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched memory free error (d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaFree(d_B);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched memory free error (d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaFree(d_C);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasDgemmBatched memory free error (d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("free pointers m1s m2s mrs...\n");
     free(m1s);
     free(m2s);
     free(mrs);
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmBatched getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmBatched getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
 
@@ -473,10 +544,10 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     const int nc = rows1 * columns2;
     int i;
 
-    _timespec64 start;
-    _timespec64 stop;
+    //_timespec64 start;
+    //_timespec64 stop;
 
-    _timespec64_get(&start, TIME_UTC);
+    //_timespec64_get(&start, TIME_UTC);
 
     h_A = (double**)malloc(batchSize * sizeof(double*));
     h_B = (double**)malloc(batchSize * sizeof(double*));
@@ -530,8 +601,8 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
         }
     }
 
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmStream total setup time...%d\n", (stop.tv_nsec - start.tv_nsec));
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmStream total setup time...%d\n", (stop.tv_nsec - start.tv_nsec));
     /*
     _timespec64_get(&start, TIME_UTC);
     //printf("CUDA malloc d_A...\n");
@@ -568,7 +639,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
 
     // printf("cublasDgemm...\n");
      /* Performs operation using cublas */
-    _timespec64_get(&start, TIME_UTC);
+    //_timespec64_get(&start, TIME_UTC);
     // Launch each DGEMM operation in own CUDA stream
     for (i = 0; i < batchSize; i++) {
         // Set CUDA stream
@@ -583,11 +654,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
             return JNI_ERR;
         }
     }
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmStream...%d\n", (stop.tv_nsec - start.tv_nsec));
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmStream...%d\n", (stop.tv_nsec - start.tv_nsec));
 
     //printf("cublasGetVector d_C...\n");
-    _timespec64_get(&start, TIME_UTC);
+    //_timespec64_get(&start, TIME_UTC);
     for (i = 0; i < batchSize; i++) {
         status = cublasGetVector(nc, sizeof(h_C[0]), d_C[i], 1, h_C[i], 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
@@ -642,7 +713,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     free(m1s);
     free(m2s);
     free(mrs);
-    _timespec64_get(&stop, TIME_UTC);
-    printf("CUDA cublasDgemmStream getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasDgemmStream getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
