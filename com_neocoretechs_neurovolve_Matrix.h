@@ -10,12 +10,28 @@ extern "C" {
 #undef com_neocoretechs_neurovolve_Matrix_serialVersionUID
 #define com_neocoretechs_neurovolve_Matrix_serialVersionUID -5112564161732998513i64
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
- * Method:    matrixDotProductD
- * Signature: (JII[DII[D[D)I
- */
+* Class:     com_neocoretechs_neurovolve_Matrix
+* Method:    matrixDotProductD
+* Signature: (JII[DII[D[D)I
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPU
+	(JNIEnv*, jclass, jint, jint, jdoubleArray, jint, jint, jdoubleArray, jdoubleArray);
+
+/*
+* Class:     com_neocoretechs_neurovolve_Matrix
+* Method:    matrixDotProductDCPU
+* Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPUBatch
+	(JNIEnv*, jclass, jint, jint, jobject, jint, jint, jobject, jobject, jint);
+
+/*
+* Class:     com_neocoretechs_neurovolve_Matrix
+* Method:    matrixDotProductD
+* Signature: (JII[DII[D[D)I
+*/
 JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
-  (JNIEnv *, jclass, jlong, jint, jint, jdoubleArray, jint, jint, jdoubleArray, jdoubleArray);
+	(JNIEnv*, jclass, jlong, jint, jint, jdoubleArray, jint, jint, jdoubleArray, jdoubleArray);
 
 /*
  * Class:     com_neocoretechs_neurovolve_Matrix
@@ -23,7 +39,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
 JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDBatch
-  (JNIEnv *, jclass, jlong, jint, jint, jobject, jint, jint, jobject, jobject, jint);
+	(JNIEnv *, jclass, jlong, jint, jint, jobject, jint, jint, jobject, jobject, jint);
 
 /*
  * Class:     com_neocoretechs_neurovolve_Matrix
@@ -31,7 +47,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
 JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDStream
-(JNIEnv*, jclass, jlong, jint, jint, jobject, jint, jint, jobject, jobject, jint);
+	(JNIEnv*, jclass, jlong, jint, jint, jobject, jint, jint, jobject, jobject, jint);
 /*
  * Class:     com_neocoretechs_neurovolve_Matrix
  * Method:    cublasHandle
@@ -47,6 +63,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_neurovolve_Matrix_cublasHandle
  */
 JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_cublasHandleDestroy
   (JNIEnv *, jclass, jlong);
+
 
 #ifdef __cplusplus
 }

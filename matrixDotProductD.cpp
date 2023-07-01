@@ -1,6 +1,33 @@
 /*
 * Double precision matrix dot product JNI implementation via CUDA CUBLAS v12.1
 * author: Jonathan Groff Copyright (C) NeoCoreTechs 2023
+* CUBLAS params:
+* handle: handle to the cuBLAS library context.
+* transa: operation op(A) that is non- or (conj.) transpose.
+* transb :operation op(B) that is non- or (conj.) transpose.
+* m: number of rows of matrix op(A) and C.
+* n: number of columns of matrix op(B) and C.
+* k: number of columns of op(A) and rows of op(B).
+* alpha: <type> scalar used for multiplication.
+* A <type> array of dimensions lda x k with lda>=max(1,m) if transa == CUBLAS_OP_N and lda x m with lda>=max(1,k) otherwise.
+* lda: leading dimension of two-dimensional array used to store the matrix A.
+* B: <type> array of dimension ldb x n with ldb>=max(1,k) if transb == CUBLAS_OP_N and ldb x k with ldb>=max(1,n) otherwise.
+* ldb: leading dimension of two-dimensional array used to store matrix B.
+* beta: <type> scalar used for multiplication. If beta==0, C does not have to be a valid input.
+* C: in/out <type> array of dimensions ldc x n with ldc>=max(1,m).
+* ldc leading dimension of a two-dimensional array used to store the matrix C.
+*
+* The possible error values returned by this function and their meanings are listed below.
+* Error Value 					Meaning
+* CUBLAS_STATUS_SUCCESS			the operation completed successfully
+* CUBLAS_STATUS_NOT_INITIALIZED	the library was not initialized
+* CUBLAS_STATUS_INVALID_VALUE	If m, n, k < 0 or if transa, transb != CUBLAS_OP_N, CUBLAS_OP_C, CUBLAS_OP_T or
+*								if lda < max(1, m) if transa == CUBLAS_OP_N and lda < max(1, k) otherwise or
+*								if ldb < max(1, k) if transb == CUBLAS_OP_N and ldb < max(1, n) otherwise or if ldc < max(1, m) or
+*								if alpha, beta == NULL or C == NULL if C needs to be scaled
+* CUBLAS_STATUS_ARCH_MISMATCH	in the case of cublasHgemm the device does not support math in half precision.
+* CUBLAS_STATUS_EXECUTION_FAILED	the function failed to launch on the GPU
+* 
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,8 +42,7 @@
 timespec stop, start;
 
 /* Host implementation of a simple version of sgemm */
-static void simple_dgemm(int rows1, int cols1, int rows2, int cols2, double alpha, const double *A, const double *B,
-                         double beta, double *C) {
+static void simple_dgemm(int rows1, int cols1, int rows2, int cols2, const double *A, const double *B, double *C) {
   int i;
   int j;
   int k;
@@ -27,7 +53,7 @@ static void simple_dgemm(int rows1, int cols1, int rows2, int cols2, double alph
       for (k = 0; k < cols1; ++k) {
         prod += A[k * rows1 + i] * B[j * rows2 + k];
       }
-      C[j * rows1 + i] = alpha * prod + beta * C[j * rows1 + i];
+      C[j * rows1 + i] = prod;// alpha* prod + beta * C[j * rows1 + i];
     }
   }
 }
@@ -59,7 +85,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_cublasHandleDestr
 }
 
 /*
- * Class:     com_neocoretechs_neurovolve_MatrixCu
+ * Class:     com_neocoretechs_neurovolve_Matrix
  * Method:    matrixDotProductD
  * Signature: (LII[DII[D[D)I
  */
@@ -715,5 +741,197 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
     free(mrs);
     //_timespec64_get(&stop, TIME_UTC);
     //printf("CUDA cublasDgemmStream getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+    return JNI_OK;
+}
+
+/*
+ * Class:     com_neocoretechs_neurovolve_Matrix
+ * Method:    matrixDotProductDCPU
+ * Signature: (LII[DII[D[D)I
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPU(JNIEnv* env, jclass clazz, jint rows1, jint columns1, jdoubleArray m1, jint rows2, jint columns2, jdoubleArray m2, jdoubleArray mr) {
+ 
+    double* h_A = 0;
+    double* h_B = 0;
+    double* h_C = 0;
+    //double *h_C_ref = 0;
+
+    //double alpha = 1.0f;
+    //double beta = 0.0f;
+
+    const int n2 = rows2 * columns2;
+    const int n1 = rows1 * columns1;
+    const int nc = rows1 * columns2;
+    int i;
+    /* for test vs CPU
+    float error_norm;
+    float ref_norm;
+    float diff;
+    */
+
+    /* Allocate host memory for the matrices */
+    /*h_A = (double*)(malloc(n1 * sizeof(h_A[0])));
+    if (h_A == 0) {
+      fprintf(stderr, "!!!! host memory allocation error (A)\n");
+      return NULL;
+    }
+    */
+    /*h_B = (double*)(malloc(n2 * sizeof(h_B[0])));
+    if (h_B == 0) {
+      fprintf(stderr, "!!!! host memory allocation error (B)\n");
+      return NULL;
+    }
+    */
+    //printf("Get Double h_A...\n");
+    h_A = env->GetDoubleArrayElements(m1, NULL);
+    //printf("Get Double h_B...\n");
+    h_B = env->GetDoubleArrayElements(m2, NULL);
+    //printf("Get Double h_C...\n");
+    h_C = env->GetDoubleArrayElements(mr, NULL);
+    /*
+    h_C = (double *)(malloc(nc * sizeof(h_C[0])));
+    if (h_C == 0) {
+      printf("!!!! host memory allocation error (C)\n");
+      return JNI_ERR;
+    }
+    */
+    /* Allocate device memory for the matrices */
+    //_timespec64 start;
+    //_timespec64 stop;
+    //_timespec64_get(&start, TIME_UTC);
+
+    //simple_dgemm(rows1, columns1, rows2, columns2, alpha, h_A, h_B, beta, h_C);
+    simple_dgemm(rows1, columns1, rows2, columns2, h_A, h_B, h_C);
+  
+    //_timespec64_get(&stop, TIME_UTC);
+    /* Allocate host memory for reading back the result from device memory
+    h_C = (double *)(malloc(nc * sizeof(h_C[0])));
+    if (h_C == 0) {
+      printf("!!!! host memory allocation error (C)\n");
+      return JNI_ERR;
+    }
+    */
+    /* Check result against reference
+    error_norm = 0;
+    ref_norm = 0;
+    for (i = 0; i < n2; ++i) {
+      diff = h_C_ref[i] - h_C[i];
+      error_norm += diff * diff;
+      ref_norm += h_C_ref[i] * h_C_ref[i];
+    }
+    error_norm = static_cast<float>(sqrt(static_cast<double>(error_norm)));
+    ref_norm = static_cast<float>(sqrt(static_cast<double>(ref_norm)));
+    if (fabs(ref_norm) < 1e-7) {
+      fprintf(stderr, "!!!! reference norm is 0\n");
+      return NULL;
+    }
+    */
+    //_timespec64_get(&start, TIME_UTC);
+    //printf("set h_C/mr double array region...\n");
+    env->SetDoubleArrayRegion(mr, 0, nc, h_C);
+    //printf("release h_A/m1 array region...\n");
+    env->ReleaseDoubleArrayElements(m1, h_A, JNI_ABORT);
+    //printf("release h_B/m2 array region...\n");
+    env->ReleaseDoubleArrayElements(m2, h_B, JNI_ABORT);
+    //printf("release h_C/mr array region...\n");
+    env->ReleaseDoubleArrayElements(mr, h_C, JNI_ABORT);
+    /* Memory clean up */
+    //free(h_A);
+    //free(h_B);
+    //free(h_C);
+    //free(h_C_ref);
+ 
+    //printf("FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+    /*
+    if (error_norm / ref_norm < 1e-6f) {
+      printf("cublasDgemm test passed.\n");
+      exit(EXIT_SUCCESS);
+    } else {
+      printf("simpleDgemm test failed.\n");
+      exit(EXIT_FAILURE);
+    }
+    */
+    return JNI_OK;
+}
+
+/*
+ * Class:     com_neocoretechs_neurovolve_Matrix
+ * Method:    matrixDotProductDCPUBatch
+ * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPUBatch
+(JNIEnv* env, jclass clazz, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
+
+    double** h_A = 0;
+    double** h_B = 0;
+    double** h_C = 0;
+
+    jobject* m1s;
+    jobject* m2s;
+    jobject* mrs;
+
+    //double alpha = 1.0f;
+    //double beta = 0.0f;
+
+    const int n2 = rows2 * columns2;
+    const int n1 = rows1 * columns1;
+    const int nc = rows1 * columns2;
+    int i;
+
+    //_timespec64 start;
+    //_timespec64 stop;
+
+    //_timespec64_get(&start, TIME_UTC);
+
+    h_A = (double**)malloc(batchSize * sizeof(double*));
+    h_B = (double**)malloc(batchSize * sizeof(double*));
+    h_C = (double**)malloc(batchSize * sizeof(double*));
+
+    m1s = (jobject*)malloc(batchSize * sizeof(jobject));
+    m2s = (jobject*)malloc(batchSize * sizeof(jobject));
+    mrs = (jobject*)malloc(batchSize * sizeof(jobject));
+
+    jclass aListClass = env->GetObjectClass(m1_AList);
+    jmethodID alGetId = env->GetMethodID(aListClass, "get", "(I)Ljava/lang/Object;");
+    for (i = 0; i < batchSize; i++) {
+        m1s[i] = env->CallObjectMethod(m1_AList, alGetId, i);
+        h_A[i] = env->GetDoubleArrayElements((jdoubleArray)m1s[i], NULL);
+        m2s[i] = env->CallObjectMethod(m2_AList, alGetId, i);
+        h_B[i] = env->GetDoubleArrayElements((jdoubleArray)m2s[i], NULL);
+        mrs[i] = env->CallObjectMethod(mr_AList, alGetId, i);
+        h_C[i] = env->GetDoubleArrayElements((jdoubleArray)mrs[i], NULL);
+    }
+    // Launch each DGEMM operation
+    for (i = 0; i < batchSize; i++) {
+        //simple_dgemm(rows1, columns1, rows2, columns2, alpha, h_A[i], h_B[i], beta, h_C[i]);
+        simple_dgemm(rows1, columns1, rows2, columns2, h_A[i], h_B[i], h_C[i]);
+    }
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("simple_Dgemm...%d\n", (stop.tv_nsec - start.tv_nsec));
+
+    //_timespec64_get(&start, TIME_UTC);
+    for (i = 0; i < batchSize; i++) {
+        // _timespec64_get(&stop, TIME_UTC);
+         //_timespec64_get(&start, TIME_UTC);
+         //printf("set h_C/mr double array region...\n");
+        env->SetDoubleArrayRegion((jdoubleArray)mrs[i], 0, nc, h_C[i]);
+        //printf("release h_A/m1 array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)m1s[i], h_A[i], JNI_ABORT);
+        //printf("release h_B/m2 array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)m2s[i], h_B[i], JNI_ABORT);
+        //printf("release h_C/mr array region...\n");
+        env->ReleaseDoubleArrayElements((jdoubleArray)mrs[i], h_C[i], JNI_ABORT);
+    }
+    /* JNI cleanup */
+    env->DeleteLocalRef(aListClass);
+    /* Pointer Memory clean up */
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    free(m1s);
+    free(m2s);
+    free(mrs);
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("simple_dgemm FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
