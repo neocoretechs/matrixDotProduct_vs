@@ -938,7 +938,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductFCPUBat
     //printf("simple_sgemm FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
-JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublasGemm_cudaMemGetInfo(JNIEnv* env, jclass clazz) {
+JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JNIEnv* env, jclass clazz) {
     size_t freeMem = 0, totalMem = 0;
     cudaError_t err = cudaMemGetInfo(&freeMem, &totalMem);
 

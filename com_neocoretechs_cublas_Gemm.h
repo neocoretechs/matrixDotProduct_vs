@@ -103,7 +103,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_cublasHandle
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_cublasHandleDestroy
   (JNIEnv *, jclass, jlong);
 
-JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublasGemm_cudaMemGetInfo(JNIEnv* env, jclass clazz);
+JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JNIEnv* env, jclass clazz);
 
 #ifdef __cplusplus
 }
