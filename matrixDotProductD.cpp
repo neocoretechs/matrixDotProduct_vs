@@ -37,9 +37,8 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#include "com_neocoretechs_neurovolve_Matrix.h"
+#include "com_neocoretechs_cublas_Gemm.h"
 
-timespec stop, start;
 
 /* Host implementation of a simple version of sgemm */
 static void simple_dgemm(int rows1, int cols1, int rows2, int cols2, const double *A, const double *B, double *C) {
@@ -58,38 +57,14 @@ static void simple_dgemm(int rows1, int cols1, int rows2, int cols2, const doubl
   }
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_neurovolve_Matrix_cublasHandle(JNIEnv* env, jclass clazz) {
-    cublasStatus_t status;
-    cublasHandle_t handle = NULL;
 
-    /* Initialize CUBLAS */
-    printf("CUBLAS creating handle...\n");
-    status = cublasCreate(&handle);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("!!!!cublasCreate CUBLAS initialization error %s\n", cublasGetStatusString(status));
-        return (jlong)JNI_ERR;
-    }
-    printf("CUBLAS handle created...\n");
-    return (jlong)handle;
-}
-
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_cublasHandleDestroy(JNIEnv* env, jclass clazz, jlong handle) {
-  cublasStatus_t status;
-  /* Shutdown */
-  status = cublasDestroy((cublasHandle_t)handle);
-  if (status != CUBLAS_STATUS_SUCCESS) {
-    printf("!!!!cublasDestroy shutdown error (A) %s\n", cublasGetStatusString(status));
-    return JNI_ERR;
-  }
-  return JNI_OK;
-}
 
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
+ * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductD
  * Signature: (LII[DII[D[D)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD(JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jdoubleArray m1, jint rows2, jint columns2, jdoubleArray m2, jdoubleArray mr) {
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductD(JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jdoubleArray m1, jint rows2, jint columns2, jdoubleArray m2, jdoubleArray mr) {
   cublasStatus_t status;
   cudaError_t cudaErr;
 
@@ -291,11 +266,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
   */
 }
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
+ * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductDBatch
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDBatch
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDBatch
 (JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
     cublasStatus_t status;
     cudaError_t cudaErr;
@@ -541,11 +516,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
 }
 
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
+ * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductDStream
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDStream
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDStream
 (JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
     cublasStatus_t status;
     cudaError_t cudaErr;
@@ -745,11 +720,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
 }
 
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
+ * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductDCPU
  * Signature: (LII[DII[D[D)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPU(JNIEnv* env, jclass clazz, jint rows1, jint columns1, jdoubleArray m1, jint rows2, jint columns2, jdoubleArray m2, jdoubleArray mr) {
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDCPU(JNIEnv* env, jclass clazz, jint rows1, jint columns1, jdoubleArray m1, jint rows2, jint columns2, jdoubleArray m2, jdoubleArray mr) {
  
     double* h_A = 0;
     double* h_B = 0;
@@ -855,11 +830,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductD
 }
 
 /*
- * Class:     com_neocoretechs_neurovolve_Matrix
+ * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductDCPUBatch
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_neurovolve_Matrix_matrixDotProductDCPUBatch
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDCPUBatch
 (JNIEnv* env, jclass clazz, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
 
     double** h_A = 0;
