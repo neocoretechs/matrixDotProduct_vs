@@ -88,6 +88,30 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductFCPUBat
   (JNIEnv *, jclass, jint, jint, jobject, jint, jint, jobject, jobject, jint);
 
 /*
+* Class:     com_neocoretechs_cublas_Gemm
+* Method : matrixDotProductF16
+* Signature : (LII[DII[D[D)I
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16
+(JNIEnv * env, jclass clazz, jlong handle, jint rows1, jint columns1, jfloatArray m1, jint rows2, jint columns2, jfloatArray m2, jfloatArray mr);
+
+/*
+ * Class:     com_neocoretechs_cublas_Gemm
+ * Method:    matrixDotProductF16Batch
+ * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Batch
+(JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize);
+
+/*
+ * Class:     com_neocoretechs_cublas_Gemm
+ * Method:    matrixDotProductF16Stream
+ * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stream
+(JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize);
+
+/*
  * Class:     com_neocoretechs_cublas_Gemm
  * Method:    cublasHandle
  * Signature: ()J
