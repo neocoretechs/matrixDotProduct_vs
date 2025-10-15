@@ -150,7 +150,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductD(JNIEn
   //printf("CUDA malloc d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
   /* Initialize the device matrices with the host matrices */
   //_timespec64_get(&start, TIME_UTC);
-  status = cublasSetVector(n1, sizeof(h_A[0]), h_A, 1, d_A, 1);
+  status = cublasSetVector(n1, sizeof(double), h_A, 1, d_A, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (write A) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
@@ -158,7 +158,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductD(JNIEn
   //_timespec64_get(&stop, TIME_UTC);
   //printf("CUDA setVector d_A/B...%d\n", (stop.tv_nsec - start.tv_nsec));
   //_timespec64_get(&start, TIME_UTC);
-  status = cublasSetVector(n2, sizeof(h_B[0]), h_B, 1, d_B, 1);
+  status = cublasSetVector(n2, sizeof(double), h_B, 1, d_B, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (write B) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
@@ -166,7 +166,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductD(JNIEn
   //_timespec64_get(&stop, TIME_UTC);
   //printf("CUDA setVector d_B/C...%d\n", (stop.tv_nsec - start.tv_nsec));
   //_timespec64_get(&start, TIME_UTC);
-  status = cublasSetVector(nc, sizeof(h_C[0]), h_C, 1, d_C, 1);
+  status = cublasSetVector(nc, sizeof(double), h_C, 1, d_C, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (write C) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
@@ -197,7 +197,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductD(JNIEn
   /* Read the result back */
  //printf("cublasGetVector d_C...\n");
   //_timespec64_get(&start, TIME_UTC);
-  status = cublasGetVector(nc, sizeof(h_C[0]), d_C, 1, h_C, 1);
+  status = cublasGetVector(nc, sizeof(double), d_C, 1, h_C, 1);
   if (status != CUBLAS_STATUS_SUCCESS) {
     printf("!!!!cublasDgemm device access error (read C) %s\n", cublasGetStatusString(status));
     return JNI_ERR;
@@ -381,19 +381,19 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDBatch
         mrs[i] = env->CallObjectMethod(mr_AList, alGetId, i);
         C[i] = env->GetDoubleArrayElements((jdoubleArray)mrs[i], NULL);
         //printf("cublasDgemmBatched JNI get %d\n",i);
-        status = cublasSetMatrix(rows1, columns1, sizeof(h_A[0]), A[i], rows1, h_A[i], rows1);
+        status = cublasSetMatrix(rows1, columns1, sizeof(double), A[i], rows1, h_A[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write A) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
         //printf("cublasDgemmBatched setMatrix 1 %d\n", i);
-        status = cublasSetMatrix(rows2, columns2, sizeof(h_B[0]), B[i], rows2, h_B[i], rows2);
+        status = cublasSetMatrix(rows2, columns2, sizeof(double), B[i], rows2, h_B[i], rows2);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write B) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
         //printf("cublasDgemmBatched setMatrix 2 %d\n", i);
-        status = cublasSetMatrix(rows1, columns2, sizeof(h_C[0]), C[i], rows1, h_C[i], rows1);
+        status = cublasSetMatrix(rows1, columns2, sizeof(double), C[i], rows1, h_C[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (write C) %s for batch # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
@@ -442,7 +442,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDBatch
    // _timespec64_get(&start, TIME_UTC);
     for (i = 0; i < batchSize; i++) {
         //printf("CUDA cublasDgemmBatched getVector...%d\n", i);
-        status = cublasGetMatrix(rows1, columns2, sizeof(h_C[0]), h_C[i], rows1, C[i], rows1);
+        status = cublasGetMatrix(rows1, columns2, sizeof(double), h_C[i], rows1, C[i], rows1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmBatched device access error (read C) %s for batch # %d\n", cublasGetStatusString(status),i);
             return JNI_ERR;
@@ -585,17 +585,17 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDStream
             printf("!!!!cublasDgemmStream device memory allocation error (allocate C) %s for stream # %d\n", cudaGetErrorString(cudaErr), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(n1, sizeof(h_A[0]), h_A[i], 1, d_A[i], 1);
+        status = cublasSetVector(n1, sizeof(double), h_A[i], 1, d_A[i], 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmStream device access error (write A) %s for stream # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(n2, sizeof(h_B[0]), h_B[i], 1, d_B[i], 1);
+        status = cublasSetVector(n2, sizeof(double), h_B[i], 1, d_B[i], 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmStream device access error (write B) %s for stream # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
         }
-        status = cublasSetVector(nc, sizeof(h_C[0]), h_C[i], 1, d_C[i], 1);
+        status = cublasSetVector(nc, sizeof(double), h_C[i], 1, d_C[i], 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmStream device access error (write C) %s for stream # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
@@ -661,7 +661,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductDStream
     //printf("cublasGetVector d_C...\n");
     //_timespec64_get(&start, TIME_UTC);
     for (i = 0; i < batchSize; i++) {
-        status = cublasGetVector(nc, sizeof(h_C[0]), d_C[i], 1, h_C[i], 1);
+        status = cublasGetVector(nc, sizeof(double), d_C[i], 1, h_C[i], 1);
         if (status != CUBLAS_STATUS_SUCCESS) {
             printf("!!!!cublasDgemmStream device access error (read C)  %s for stream # %d\n", cublasGetStatusString(status), i);
             return JNI_ERR;
