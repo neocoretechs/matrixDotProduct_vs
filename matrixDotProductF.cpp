@@ -73,6 +73,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_cublasHandle(JNIEnv* e
     //cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
     //cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
     // For FP16 GEMMs, use CUDA_R_16F inputs + tensor ops kernels
+    cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
     printf("CUBLAS handle created...\n");
     return (jlong)handle;
 }
