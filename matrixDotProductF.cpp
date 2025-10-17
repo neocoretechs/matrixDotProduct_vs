@@ -961,4 +961,33 @@ JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JN
     env->SetLongArrayRegion(result, 0, 2, vals);
     return result;
 }
+/**
+* Simple dot product single precision
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdot(JNIEnv* env, jclass clazz, jlong handle, jint n, jfloatArray x, jint incx, jfloatArray y, jint incy, jfloatArray result) {
+    // Copy input arrays from JVM
+    jfloat* hx = env->GetFloatArrayElements(x, nullptr);
+    jfloat* hy = env->GetFloatArrayElements(y, nullptr);
+    float* dx, * dy, * dres;
+    cudaMalloc(&dx, n * sizeof(float));
+    cudaMalloc(&dy, n * sizeof(float));
+    cudaMalloc(&dres, sizeof(float));
 
+    cudaMemcpy(dx, hx, n * sizeof(float), cudaMemcpyHostToDevice);
+    cudaMemcpy(dy, hy, n * sizeof(float), cudaMemcpyHostToDevice);
+
+    float hostRes = 0.0f;
+    cublasStatus_t stat = cublasSdot((cublasHandle_t)handle, n, dx, incx, dy, incy, &hostRes);
+
+    // Copy result back
+    env->SetFloatArrayRegion(result, 0, 1, &hostRes);
+
+    // Cleanup
+    cudaFree(dx);
+    cudaFree(dy);
+    cudaFree(dres);
+    env->ReleaseFloatArrayElements(x, hx, JNI_ABORT);
+    env->ReleaseFloatArrayElements(y, hy, JNI_ABORT);
+
+    return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : -1;
+}

@@ -136,7 +136,28 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_cublasHandleDestroy
   (JNIEnv *, jclass, jlong);
 
 JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JNIEnv* env, jclass clazz);
+/*
+* Scalar dot product of 2 of float32 cublasSdot
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdot(JNIEnv* env, jclass clazz, jlong handle, jint n, jfloatArray x, jint incx, jfloatArray y, jint incy, jfloatArray result);
+/*
+* Upload slice for batch attention
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_uploadSlice(JNIEnv* env, jclass, jlong ctxHandle, jfloatArray hostBuf, jlong devicePtr, jlong offset, jint count);
+/*
+* Allocate device memory for batch attention
+*/
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_init(JNIEnv*, jclass, jint maxB, jint maxH, jint maxTq, jint maxTk, jint d);
 
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDQ(JNIEnv*, jclass, jlong ctxHandle);
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDK(JNIEnv*, jclass, jlong ctxHandle);
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDV(JNIEnv*, jclass, jlong ctxHandle);
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDS(JNIEnv*, jclass, jlong ctxHandle);
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDO(JNIEnv*, jclass, jlong ctxHandle);
 #ifdef __cplusplus
 }
 #endif

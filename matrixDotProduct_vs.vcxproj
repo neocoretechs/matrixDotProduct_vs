@@ -113,6 +113,7 @@
     <ClCompile Include="matrixDotProductD.cpp" />
     <ClCompile Include="matrixDotProductF.cpp" />
     <ClCompile Include="matrixDotProductF16.cpp" />
+    <ClCompile Include="batchAttention.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="com_neocoretechs_neurovolve_Matrix.h" />

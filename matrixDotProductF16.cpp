@@ -323,7 +323,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Batc
         (const void**)d_B, CUDA_R_32F, rows2, &beta,
         (void**)d_C, CUDA_R_32F, rows1, batchSize, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT/*_TENSOR_OP*/);
     if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("!!!!cublasGemmBatchedEx kernel execution error %s\n", cublasGetStatusString(status));
+        printf("!!!!cublasGemmBatched kernel execution error %s\n", cublasGetStatusString(status));
         return JNI_ERR;
     }
     //_timespec64_get(&stop, TIME_UTC);
