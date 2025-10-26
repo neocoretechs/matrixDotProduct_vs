@@ -3,6 +3,7 @@
 * From Java, pass the handle, the scratch array, the pointer to the right device buffer, the offset in elements, and the count.
 * The native side computes the destination pointer and does an async copy into the stream set on the cuBLAS handle.
 * Due to use on release, the JVM doesn’t copy the scratch array back, it’s strictly one‑way staging.
+* NOTE: We deal with 2 handles here, the cublasHandle and the handle created for the AttnCtx
 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -71,17 +72,24 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_uploadSlice(JNIEnv* env
 * ctx dO float32 sized to maxB * maxH * maxTq * d
 * return handle to AttnCtx struct
 */
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv* env, jclass clazz, jint maxB, jint maxH, jint maxTq, jint maxTk, jint d) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv* env, jclass clazz, jlong handle, jint maxB, jint maxH, jint maxTq, jint maxTk, jint d) {
     auto* ctx = new AttnCtx;
     ctx->maxB = maxB; 
     ctx->maxH = maxH;
     ctx->maxTq = maxTq; 
     ctx->maxTk = maxTk; 
     ctx->d = d;
+    ctx->handle = (cublasHandle_t)handle;
 
-    cudaStreamCreate(&ctx->stream);
-    cublasCreate(&ctx->handle);
-    cublasSetStream(ctx->handle, ctx->stream);
+    if(cudaStreamCreate(&ctx->stream) != cudaSuccess) {
+        delete ctx;
+        return -201;
+    }
+    if (cublasSetStream(ctx->handle, ctx->stream) != CUBLAS_STATUS_SUCCESS) {
+        cudaStreamDestroy(ctx->stream);
+        delete ctx;
+        return -202;
+    }
 
     size_t qSize = (size_t)maxB * maxH * maxTq * d;
     size_t kSize = (size_t)maxB * maxH * maxTk * d;
@@ -89,11 +97,11 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv* env, jcla
     size_t sSize = (size_t)maxB * maxH * maxTq * maxTk;
     size_t oSize = (size_t)maxB * maxH * maxTq * d;
 
-    cudaMalloc(&ctx->dQ, qSize * sizeof(float));
-    cudaMalloc(&ctx->dK, kSize * sizeof(float));
-    cudaMalloc(&ctx->dV, vSize * sizeof(float));
-    cudaMalloc(&ctx->dS, sSize * sizeof(float));
-    cudaMalloc(&ctx->dO, oSize * sizeof(float));
+    if(cudaMalloc(&ctx->dQ, qSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMalloc(&ctx->dK, kSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMalloc(&ctx->dV, vSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMalloc(&ctx->dS, sSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMalloc(&ctx->dO, oSize * sizeof(float)) != cudaSuccess) return -200;
 
     return reinterpret_cast<jlong>(ctx);
 }
@@ -123,7 +131,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDO(JNIEnv* env, jcl
     return reinterpret_cast<jlong>(ctx->dO);
 }
 /*
-* Free the allocated device memory.
+* Free the allocated device memory and the stream, dont free handle.
 * handle is the handle to AttnCtx we got in Attn_init
 */
 JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv* env, jclass clazz, jlong handle) {
@@ -136,9 +144,7 @@ JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv* env, jc
     cudaFree(ctx->dS);
     cudaFree(ctx->dO);
 
-    cublasDestroy(ctx->handle);
     cudaStreamDestroy(ctx->stream);
-
     delete ctx;
 }
 /*

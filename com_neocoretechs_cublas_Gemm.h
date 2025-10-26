@@ -165,7 +165,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_downloadSlice(JNIEnv*, 
 /*
 * Allocate device memory for batch attention
 */
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv*, jclass, jint, jint, jint, jint, jint );
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv*, jclass, jlong, jint, jint, jint, jint, jint );
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDQ(JNIEnv*, jclass, jlong);
 

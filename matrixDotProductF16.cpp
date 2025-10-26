@@ -450,6 +450,9 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     int m = colsB, n = rowsA, k = colsA;
     long long strideA = oneA, strideB = oneB, strideC = oneC;
     float alpha = 1.0f, beta = 0.0f;
+
+    //printf("cublasGemmStridedBatchedEx m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n",m,n,k,strideA,strideB,strideC);
+
     cublasStatus_t stat = cublasGemmStridedBatchedEx(
         handle,
         CUBLAS_OP_T, CUBLAS_OP_T,
@@ -463,7 +466,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
         CUDA_R_32F,
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
     );
-
+    if (stat != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasGemmBatched kernel execution error %s\n", cublasGetStatusString(stat));
+        return (int)stat;
+    }
+ 
     // 6. Copy results back
     for (int b = 0; b < batchSize; b++) {
         jfloat* fC = env->GetFloatArrayElements(Cs[b], nullptr);
@@ -524,6 +531,9 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     long long strideA = (long long)(Tq * Tk);
     long long strideB = (long long)(Tk * d);
     long long strideC = (long long)(Tq * d);
+
+    printf("cublasGemmStridedBatchedFlat2 m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n", m, n, k, strideA, strideB, strideC);
+
     cublasStatus_t stat = cublasGemmStridedBatchedEx(
         handle,
         CUBLAS_OP_T, CUBLAS_OP_T,
@@ -537,7 +547,10 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
         CUDA_R_32F,
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
     );
-
+    if (stat != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasGemmStridedBatchedFlat2 kernel execution error %s\n", cublasGetStatusString(stat));
+        return (int)stat;
+    }
     // Copy results back into flat C
     for (int h = 0; h < batchSize; ++h) {
         cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
@@ -590,6 +603,8 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     long long strideC = (long long)oneC;
     float alpha = 1.0f, beta = 0.0f;
 
+    printf("cublasGemmStridedBatchedFlat m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n", m, n, k, strideA, strideB, strideC);
+
     cublasStatus_t stat = cublasGemmStridedBatchedEx(
         handle,
         CUBLAS_OP_T, CUBLAS_OP_T,
@@ -603,7 +618,10 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
         CUDA_R_32F,
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
     );
-
+    if (stat != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasGemmStridedBatchedFlat kernel execution error %s\n", cublasGetStatusString(stat));
+        return (int)stat;
+    }
     // Copy results back into flat C
     for (int h = 0; h < batchSize; ++h) {
         cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
