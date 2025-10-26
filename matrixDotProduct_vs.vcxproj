@@ -116,7 +116,8 @@
     <ClCompile Include="batchAttention.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="com_neocoretechs_neurovolve_Matrix.h" />
+    <ClInclude Include="com_neocoretechs_cublas_Gemm.h" />
+    <ClInclude Include="helpers.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

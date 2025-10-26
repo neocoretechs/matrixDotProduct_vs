@@ -1,4 +1,4 @@
-/*
+﻿/*
 * Single precision matrix dot product JNI implementation via CUDA CUBLAS v12.1
 * author: Jonathan Groff Copyright (C) NeoCoreTechs 2025
 * CUBLAS params:
@@ -49,9 +49,9 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
-
+#include <concurrent_vector.h>
 #include "com_neocoretechs_cublas_Gemm.h"
-
+#include "helpers.h"
 
 /*
  * Class:     com_neocoretechs_cublas_Gemm
@@ -405,13 +405,222 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Batc
     //printf("CUDA cublasGemmBatchedEx getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatch
+(JNIEnv* env, jclass clazz, jlong jHandle,
+    jint rowsA, jint colsA, jobject jAList,
+    jint rowsB, jint colsB, jobject jBList,
+    jobject jCList, jint batchSize) {
 
+    cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
+    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+
+    // 1. Extract Java float[] arrays from ArrayLists
+    std::vector<jfloatArray> As = jarraylist_to_jfloat_arrays(env, jAList);
+    std::vector<jfloatArray> Bs = jarraylist_to_jfloat_arrays(env, jBList);
+    std::vector<jfloatArray> Cs = jarraylist_to_jfloat_arrays(env, jCList);
+
+    size_t oneA = (size_t)rowsA * colsA;
+    size_t oneB = (size_t)rowsB * colsB;
+    size_t oneC = (size_t)rowsA * colsB;
+
+    // 2. Allocate host half buffers
+    std::vector<__half> hA(oneA * batchSize);
+    std::vector<__half> hB(oneB * batchSize);
+
+    // 3. Convert each Java float[] → half
+    for (int b = 0; b < batchSize; b++) {
+        jfloat* fA = env->GetFloatArrayElements(As[b], nullptr);
+        jfloat* fB = env->GetFloatArrayElements(Bs[b], nullptr);
+        for (size_t i = 0; i < oneA; i++) hA[b * oneA + i] = __float2half(fA[i]);
+        for (size_t i = 0; i < oneB; i++) hB[b * oneB + i] = __float2half(fB[i]);
+        env->ReleaseFloatArrayElements(As[b], fA, JNI_ABORT);
+        env->ReleaseFloatArrayElements(Bs[b], fB, JNI_ABORT);
+    }
+
+    // 4. Copy to device
+    __half* dA, * dB;
+    float* dC;
+    if(cudaMalloc(&dA, hA.size() * sizeof(__half)) != cudaSuccess) return -200;
+    if(cudaMalloc(&dB, hB.size() * sizeof(__half)) != cudaSuccess) return -200;
+    if(cudaMalloc(&dC, oneC * batchSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
+    if(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
+
+    // 5. GEMM strided batched
+    int m = colsB, n = rowsA, k = colsA;
+    long long strideA = oneA, strideB = oneB, strideC = oneC;
+    float alpha = 1.0f, beta = 0.0f;
+    cublasStatus_t stat = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_T, CUBLAS_OP_T,
+        m, n, k,
+        &alpha,
+        dB, CUDA_R_16F, colsB, strideB,
+        dA, CUDA_R_16F, colsA, strideA,
+        &beta,
+        dC, CUDA_R_32F, m, strideC,
+        batchSize,
+        CUDA_R_32F,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+    );
+
+    // 6. Copy results back
+    for (int b = 0; b < batchSize; b++) {
+        jfloat* fC = env->GetFloatArrayElements(Cs[b], nullptr);
+        cudaMemcpy(fC, dC + b * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
+        env->ReleaseFloatArrayElements(Cs[b], fC, 0);
+    }
+
+    cudaFree(dA); cudaFree(dB); cudaFree(dC);
+    return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : (int)stat;
+}
+
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatchFlat2
+(JNIEnv* env, jclass clazz, jlong jHandle,
+    jint rowsA, jint colsA, jfloatArray jA,
+    jint rowsB, jint colsB, jfloatArray jB,
+    jfloatArray jC, jint batchSize) {
+
+    cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
+    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+
+    size_t oneA = (size_t)rowsA * colsA; // Tq*d
+    size_t oneB = (size_t)rowsB * colsB; // Tk*d
+    size_t oneC = (size_t)rowsA * rowsB; // Tq*Tk
+
+    if (env->GetArrayLength(jA) != oneA * batchSize ||
+        env->GetArrayLength(jB) != oneB * batchSize ||
+        env->GetArrayLength(jC) != oneC * batchSize) {
+        return -100; // size mismatch
+    }
+
+    jfloat* fA = env->GetFloatArrayElements(jA, nullptr);
+    jfloat* fB = env->GetFloatArrayElements(jB, nullptr);
+    jfloat* fC = env->GetFloatArrayElements(jC, nullptr);
+
+    // Convert to half with per-head offsets
+    std::vector<__half> hA(oneA * batchSize);
+    std::vector<__half> hB(oneB * batchSize);
+    for (int h = 0; h < batchSize; ++h) {
+        const jfloat* aBase = fA + h * oneA;
+        const jfloat* bBase = fB + h * oneB;
+        for (size_t i = 0; i < oneA; ++i) hA[h * oneA + i] = __float2half(aBase[i]);
+        for (size_t i = 0; i < oneB; ++i) hB[h * oneB + i] = __float2half(bBase[i]);
+    }
+
+    __half* dA; __half* dB; float* dC;
+    if(cudaMalloc(&dA, hA.size() * sizeof(__half)) != cudaSuccess) return -200;
+    if(cudaMalloc(&dB, hB.size() * sizeof(__half)) != cudaSuccess) return -200;
+    if(cudaMalloc(&dC, oneC * batchSize * sizeof(float)) != cudaSuccess) return -200;
+    if(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
+    if(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    int d = colsB;
+    int Tq = rowsA;
+    int Tk = colsA;
+    int m = d, n = Tq, k = Tk;
+    long long strideA = (long long)(Tq * Tk);
+    long long strideB = (long long)(Tk * d);
+    long long strideC = (long long)(Tq * d);
+    cublasStatus_t stat = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_T, CUBLAS_OP_T,
+        m, n, k,
+        &alpha,
+        dB, CUDA_R_16F, /*lda=*/k, strideB, // V batches
+        dA, CUDA_R_16F, /*ldb=*/k, strideA, // S batches
+        &beta,
+        dC, CUDA_R_32F, /*ldc=*/n, strideC,
+        batchSize,
+        CUDA_R_32F,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+    );
+
+    // Copy results back into flat C
+    for (int h = 0; h < batchSize; ++h) {
+        cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
+    }
+
+    env->ReleaseFloatArrayElements(jA, fA, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jB, fB, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jC, fC, 0);
+    cudaFree(dA); cudaFree(dB); cudaFree(dC);
+    return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : (int)stat;
+}
+
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatchFlat
+(JNIEnv* env, jclass clazz, jlong jHandle,
+    jint rowsA, jint colsA, jfloatArray jA,
+    jint rowsB, jint colsB, jfloatArray jB,
+    jfloatArray jC, jint batchSize) {
+
+    cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
+    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+
+    size_t oneA = (size_t)rowsA * colsA; // Tq*d
+    size_t oneB = (size_t)rowsB * colsB; // Tk*d
+    size_t oneC = (size_t)rowsA * rowsB; // Tq*Tk
+
+    jfloat* fA = env->GetFloatArrayElements(jA, nullptr);
+    jfloat* fB = env->GetFloatArrayElements(jB, nullptr);
+    jfloat* fC = env->GetFloatArrayElements(jC, nullptr);
+
+    // Convert to half with per-head offsets
+    std::vector<__half> hA(oneA * batchSize);
+    std::vector<__half> hB(oneB * batchSize);
+    for (int h = 0; h < batchSize; ++h) {
+        const jfloat* aBase = fA + h * oneA;
+        const jfloat* bBase = fB + h * oneB;
+        for (size_t i = 0; i < oneA; ++i) hA[h * oneA + i] = __float2half(aBase[i]);
+        for (size_t i = 0; i < oneB; ++i) hB[h * oneB + i] = __float2half(bBase[i]);
+    }
+
+    __half* dA; __half* dB; float* dC;
+    cudaMalloc(&dA, hA.size() * sizeof(__half));
+    cudaMalloc(&dB, hB.size() * sizeof(__half));
+    cudaMalloc(&dC, oneC * batchSize * sizeof(float));
+    cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice);
+
+    int m = rowsB, n = rowsA, k = colsA;
+    long long strideA = (long long)oneA;
+    long long strideB = (long long)oneB;
+    long long strideC = (long long)oneC;
+    float alpha = 1.0f, beta = 0.0f;
+
+    cublasStatus_t stat = cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_T, CUBLAS_OP_T,
+        m, n, k,
+        &alpha,
+        dB, CUDA_R_16F, /*lda=*/k, strideB,
+        dA, CUDA_R_16F, /*ldb=*/k, strideA,
+        &beta,
+        dC, CUDA_R_32F, /*ldc=*/n, strideC,
+        batchSize,
+        CUDA_R_32F,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+    );
+
+    // Copy results back into flat C
+    for (int h = 0; h < batchSize; ++h) {
+        cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
+    }
+
+    env->ReleaseFloatArrayElements(jA, fA, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jB, fB, JNI_ABORT);
+    env->ReleaseFloatArrayElements(jC, fC, 0);
+    cudaFree(dA); cudaFree(dB); cudaFree(dC);
+    return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : (int)stat;
+}
 /*
  * Class:     com_neocoretechs_cublas_Gemm
- * Method:    matrixDotProductF16StridedBatch
+ * Method:    matrixDotProductF32StridedBatch
  * Signature: (JIILjava/util/ArrayList;IILjava/util/ArrayList;Ljava/util/ArrayList;I)I
  */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatch
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF32StridedBatch
 (JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
     cublasStatus_t status;
     cudaError_t cudaErr;
@@ -807,5 +1016,3 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stre
     //printf("CUDA cublasGemmExStream getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
-
-

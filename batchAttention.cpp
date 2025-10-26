@@ -33,7 +33,7 @@ struct AttnCtx {
 * return 0 for success else error code -1 if ctxHandle is null, -2 if hostBuf is null or elemets return is bad
 * or cudaError_t code from cudaMemcpyAsynch
 */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_uploadSlice(JNIEnv * env, jclass, jlong ctxHandle, jfloatArray hostBuf, jlong devicePtr, jlong offset, jint count) {
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_uploadSlice(JNIEnv* env, jclass clazz, jlong ctxHandle, jfloatArray hostBuf, jlong devicePtr, jlong offset, jint count) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     if (!ctx) return -1;
 
@@ -71,7 +71,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_uploadSlice(JNIEnv
 * ctx dO float32 sized to maxB * maxH * maxTq * d
 * return handle to AttnCtx struct
 */
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_init(JNIEnv*, jclass, jint maxB, jint maxH, jint maxTq, jint maxTk, jint d) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv* env, jclass clazz, jint maxB, jint maxH, jint maxTq, jint maxTk, jint d) {
     auto* ctx = new AttnCtx;
     ctx->maxB = maxB; 
     ctx->maxH = maxH;
@@ -98,27 +98,27 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_init(JNIEnv*, jcl
     return reinterpret_cast<jlong>(ctx);
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDQ(JNIEnv*, jclass, jlong ctxHandle) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDQ(JNIEnv* env, jclass clazz, jlong ctxHandle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     return reinterpret_cast<jlong>(ctx->dQ);
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDK(JNIEnv*, jclass, jlong ctxHandle) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDK(JNIEnv* env, jclass clazz, jlong ctxHandle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     return reinterpret_cast<jlong>(ctx->dK);
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDV(JNIEnv*, jclass, jlong ctxHandle) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDV(JNIEnv*, jclass clazz, jlong ctxHandle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     return reinterpret_cast<jlong>(ctx->dV);
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDS(JNIEnv*, jclass, jlong ctxHandle) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDS(JNIEnv* env, jclass clazz, jlong ctxHandle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     return reinterpret_cast<jlong>(ctx->dS);
 }
 
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDO(JNIEnv*, jclass, jlong ctxHandle) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDO(JNIEnv* env, jclass clazz, jlong ctxHandle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
     return reinterpret_cast<jlong>(ctx->dO);
 }
@@ -126,7 +126,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_getDO(JNIEnv*, jc
 * Free the allocated device memory.
 * handle is the handle to AttnCtx we got in Attn_init
 */
-JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_destroy(JNIEnv*, jclass, jlong handle) {
+JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv* env, jclass clazz, jlong handle) {
     auto* ctx = reinterpret_cast<AttnCtx*>(handle);
     if (!ctx) return;
 
@@ -140,4 +140,40 @@ JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Gemm_Attn_destroy(JNIEnv*, j
     cudaStreamDestroy(ctx->stream);
 
     delete ctx;
+}
+/*
+ * Download an array of floats from GPU device memory into a Java float[].
+ * ctxHandle is returned from Attn_init.
+ * hostBuf is the Java float[] to receive data.
+ * devicePtr is the source pointer in device memory (e.g. ctx->dO).
+ * offset is the offset in elements into devicePtr.
+ * count is the number of floats to transfer.
+ * Returns 0 for success, -1 if ctxHandle is null, -2 if hostBuf is null,
+ * or a cudaError_t code if cudaMemcpyAsync fails.
+ */
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_downloadSlice
+(JNIEnv* env, jclass clazz, jlong ctxHandle, jfloatArray hostBuf,
+    jlong devicePtr, jlong offset, jint count) {
+
+    auto* ctx = reinterpret_cast<AttnCtx*>(ctxHandle);
+    if (!ctx) return -1;
+
+    jfloat* hPtr = env->GetFloatArrayElements(hostBuf, nullptr);
+    if (!hPtr) return -2;
+
+    float* dBase = reinterpret_cast<float*>(devicePtr);
+    float* dSrc = dBase + offset;
+
+    cudaError_t err = cudaMemcpyAsync(
+        hPtr,
+        dSrc,
+        count * sizeof(float),
+        cudaMemcpyDeviceToHost,
+        ctx->stream
+    );
+
+    // Commit results back to Java array
+    env->ReleaseFloatArrayElements(hostBuf, hPtr, 0);
+
+    return (err == cudaSuccess) ? 0 : (int)err;
 }

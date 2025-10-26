@@ -1,4 +1,4 @@
-/*
+﻿/*
 * Single precision matrix dot product JNI implementation via CUDA CUBLAS v12.1
 * author: Jonathan Groff Copyright (C) NeoCoreTechs 2025
 * CUBLAS params:
@@ -38,6 +38,7 @@
 #include <cuda_runtime.h>
 
 #include "com_neocoretechs_cublas_Gemm.h"
+
 
 timespec stop, start;
 
