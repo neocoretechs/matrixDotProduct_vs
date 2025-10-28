@@ -102,8 +102,8 @@
       <Runtime>MT</Runtime>
       <TargetMachinePlatform>64</TargetMachinePlatform>
       <CudaRuntime Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Shared</CudaRuntime>
-      <GenerateRelocatableDeviceCode Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</GenerateRelocatableDeviceCode>
-      <ExtensibleWholeProgramCompilation Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</ExtensibleWholeProgramCompilation>
+      <GenerateRelocatableDeviceCode Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</GenerateRelocatableDeviceCode>
+      <ExtensibleWholeProgramCompilation Condition="'$(Configuration)|$(Platform)'=='Release|x64'">false</ExtensibleWholeProgramCompilation>
     </CudaCompile>
     <CudaLink>
       <Optimization Condition="'$(Configuration)|$(Platform)'=='Release|x64'">O2</Optimization>
@@ -118,6 +118,9 @@
   <ItemGroup>
     <ClInclude Include="com_neocoretechs_cublas_Gemm.h" />
     <ClInclude Include="helpers.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <CudaCompile Include="attn_test_fp32.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

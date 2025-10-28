@@ -7,9 +7,20 @@
             "command": "make dbg=1",
             "problemMatcher": ["$nvcc"],
             "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        }
+                "kind": "build"
+                          }
+        },
+{
+  "label": "Build CUDA",
+  "type": "shell",
+  "command": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1/bin/nvcc.exe",
+  "args": [
+    "-arch=sm_75",          // adjust for your GPU (sm_86 for RTX 30xx, sm_89 for RTX 40xx)
+    "-o",
+    "softmax_test.exe",
+    "softmax_test.cu"
+  ],
+  "problemMatcher": []
+}
     ]
 }

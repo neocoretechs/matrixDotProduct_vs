@@ -53,6 +53,9 @@
 #include "com_neocoretechs_cublas_Gemm.h"
 #include "helpers.h"
 
+auto ck = [](cudaError_t e, const char* msg) { if (e != cudaSuccess) { printf("%s: %s\n", msg, cudaGetErrorString(e)); return true; } return false; };
+
+
 /*
  * Class:     com_neocoretechs_cublas_Gemm
  * Method:    matrixDotProductF16
@@ -405,83 +408,263 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Batc
     //printf("CUDA cublasGemmBatchedEx getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
     return JNI_OK;
 }
+/*
+* F16 Strided Batch
+* Takes ArrayList of float 32 and coverts to F16 before matrix multiply
+*/
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatch
-(JNIEnv* env, jclass clazz, jlong jHandle,
-    jint rowsA, jint colsA, jobject jAList,
-    jint rowsB, jint colsB, jobject jBList,
-    jobject jCList, jint batchSize) {
-
-    cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
-    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
-
-    // 1. Extract Java float[] arrays from ArrayLists
-    std::vector<jfloatArray> As = jarraylist_to_jfloat_arrays(env, jAList);
-    std::vector<jfloatArray> Bs = jarraylist_to_jfloat_arrays(env, jBList);
-    std::vector<jfloatArray> Cs = jarraylist_to_jfloat_arrays(env, jCList);
-
-    size_t oneA = (size_t)rowsA * colsA;
-    size_t oneB = (size_t)rowsB * colsB;
-    size_t oneC = (size_t)rowsA * colsB;
-
-    // 2. Allocate host half buffers
-    std::vector<__half> hA(oneA * batchSize);
-    std::vector<__half> hB(oneB * batchSize);
-
-    // 3. Convert each Java float[] → half
-    for (int b = 0; b < batchSize; b++) {
-        jfloat* fA = env->GetFloatArrayElements(As[b], nullptr);
-        jfloat* fB = env->GetFloatArrayElements(Bs[b], nullptr);
-        for (size_t i = 0; i < oneA; i++) hA[b * oneA + i] = __float2half(fA[i]);
-        for (size_t i = 0; i < oneB; i++) hB[b * oneB + i] = __float2half(fB[i]);
-        env->ReleaseFloatArrayElements(As[b], fA, JNI_ABORT);
-        env->ReleaseFloatArrayElements(Bs[b], fB, JNI_ABORT);
-    }
-
-    // 4. Copy to device
-    __half* dA, * dB;
-    float* dC;
-    if(cudaMalloc(&dA, hA.size() * sizeof(__half)) != cudaSuccess) return -200;
-    if(cudaMalloc(&dB, hB.size() * sizeof(__half)) != cudaSuccess) return -200;
-    if(cudaMalloc(&dC, oneC * batchSize * sizeof(float)) != cudaSuccess) return -200;
-    if(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
-    if(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
-
-    // 5. GEMM strided batched
-    int m = colsB, n = rowsA, k = colsA;
-    long long strideA = oneA, strideB = oneB, strideC = oneC;
-    float alpha = 1.0f, beta = 0.0f;
-
-    //printf("cublasGemmStridedBatchedEx m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n",m,n,k,strideA,strideB,strideC);
-
-    cublasStatus_t stat = cublasGemmStridedBatchedEx(
-        handle,
-        CUBLAS_OP_T, CUBLAS_OP_T,
-        m, n, k,
-        &alpha,
-        dB, CUDA_R_16F, colsB, strideB,
-        dA, CUDA_R_16F, colsA, strideA,
-        &beta,
-        dC, CUDA_R_32F, m, strideC,
-        batchSize,
-        CUDA_R_32F,
-        CUBLAS_GEMM_DEFAULT_TENSOR_OP
-    );
-    if (stat != CUBLAS_STATUS_SUCCESS) {
-        printf("!!!!cublasGemmBatched kernel execution error %s\n", cublasGetStatusString(stat));
-        return (int)stat;
-    }
+(JNIEnv* env, jclass clazz, jlong handle, jint rows1, jint columns1, jobject m1_AList, jint rows2, jint columns2, jobject m2_AList, jobject mr_AList, jint batchSize) {
  
-    // 6. Copy results back
-    for (int b = 0; b < batchSize; b++) {
-        jfloat* fC = env->GetFloatArrayElements(Cs[b], nullptr);
-        cudaMemcpy(fC, dC + b * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
-        env->ReleaseFloatArrayElements(Cs[b], fC, 0);
+    cublasStatus_t status;
+    cudaError_t cudaErr;
+
+    // Allocate host storage for batch_count A,B,C matrices
+    float** A, ** B, ** C;
+
+    float** h_A = 0;
+    float** h_B = 0;
+    float** h_C = 0;
+    // device pointers
+    float** d_A = 0;
+    float** d_B = 0;
+    float** d_C = 0;
+
+    jobject* m1s;
+    jobject* m2s;
+    jobject* mrs;
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    const int M = rows1; // Number of rows in A and C
+    const int N = columns2; // Number of columns in B and C
+    const int K = rows2; // Number of columns in A and rows in B
+
+    const int n2 = rows2 * columns2;
+    const int n1 = rows1 * columns1;
+    const int nc = rows1 * columns2;
+    int i;
+
+    // Device pointers
+    cudaMalloc((void**)&d_A, batchSize * sizeof(float*));
+    cudaMalloc((void**)&d_B, batchSize * sizeof(float*));
+    cudaMalloc((void**)&d_C, batchSize * sizeof(float*));
+    // Copy matrices to device
+    for (int i = 0; i < batchSize; i++) {
+        cudaMalloc((void**)&d_A[i], M * K * sizeof(float));
+        cudaMemcpy(d_A[i], h_A[i], M * K * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMalloc((void**)&d_B[i], K * N * sizeof(float));
+        cudaMemcpy(d_B[i], h_B[i], K * N * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMalloc((void**)&d_C[i], M * N * sizeof(float));
     }
 
-    cudaFree(dA); cudaFree(dB); cudaFree(dC);
-    return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : (int)stat;
-}
+    jclass aListClass = env->GetObjectClass(m1_AList);
+    jmethodID alGetId = env->GetMethodID(aListClass, "get", "(I)Ljava/lang/Object;");
 
+    for (i = 0; i < batchSize; i++) {
+        cudaErr = cudaMalloc((void**)(&h_A[i]), n1 * sizeof(float));
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate A) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+        cudaErr = cudaMalloc((void**)(&h_B[i]), n2 * sizeof(float));
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate B) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+        cudaErr = cudaMalloc((void**)(&h_C[i]), nc * sizeof(float));
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate C) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+    }
+    //printf("cublasGemmBatchedEx cudaMalloc1\n");
+    // Copy the host array of device pointers to the device
+    cudaErr = cudaMalloc((void**)&d_A, batchSize * sizeof(float*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMalloc((void**)&d_B, batchSize * sizeof(float*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMalloc((void**)&d_C, batchSize * sizeof(float*));
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory allocation error (allocate d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("cublasGemmBatchedEx cudaMalloc2\n");
+    cudaErr = cudaMemcpy(d_A, h_A, batchSize * sizeof(float*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory copy error (copy h_A to d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMemcpy(d_B, h_B, batchSize * sizeof(float*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory copy error (copy h_B to d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaMemcpy(d_C, h_C, batchSize * sizeof(float*), cudaMemcpyHostToDevice);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx device memory copy error (copy h_C to d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("cublasgGemmBatchedEx cudaMemcpy1\n");
+    // move JNI ArrayList data to allocated memory
+    for (i = 0; i < batchSize; i++) {
+        m1s[i] = env->CallObjectMethod(m1_AList, alGetId, i);
+        A[i] = env->GetFloatArrayElements((jfloatArray)m1s[i], NULL);
+        m2s[i] = env->CallObjectMethod(m2_AList, alGetId, i);
+        B[i] = env->GetFloatArrayElements((jfloatArray)m2s[i], NULL);
+        mrs[i] = env->CallObjectMethod(mr_AList, alGetId, i);
+        C[i] = env->GetFloatArrayElements((jfloatArray)mrs[i], NULL);
+        //printf("cublasGemmBatchedEx JNI get %d\n",i);
+        status = cublasSetMatrix(rows1, columns1, sizeof(float), A[i], rows1, h_A[i], rows1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            printf("!!!!cublasGemmBatchedEx device access error (write A) %s for batch # %d\n", cublasGetStatusString(status), i);
+            return JNI_ERR;
+        }
+        //printf("cublasGemmBatchedEx setMatrix 1 %d\n", i);
+        status = cublasSetMatrix(rows2, columns2, sizeof(float), B[i], rows2, h_B[i], rows2);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            printf("!!!!cublasGemmBatchedEx device access error (write B) %s for batch # %d\n", cublasGetStatusString(status), i);
+            return JNI_ERR;
+        }
+        //printf("cublasGemmBatchedEx setMatrix 2 %d\n", i);
+        status = cublasSetMatrix(rows1, columns2, sizeof(float), C[i], rows1, h_C[i], rows1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            printf("!!!!cublasGemmBatchedEx device access error (write C) %s for batch # %d\n", cublasGetStatusString(status), i);
+            return JNI_ERR;
+        }
+        //printf("cublasGemmBatchedEx setMatrix 3 %d\n", i);
+    }
+    /*
+    cublasStatus_t cublasGemmStridedBatchedEx(
+        cublasHandle_t handle,
+        cublasOperation_t transa,
+        cublasOperation_t transb,
+        int m, int n, int k,
+        const void* alpha,
+        const void* A, cudaDataType Atype, int lda, long long int strideA,
+        const void* B, cudaDataType Btype, int ldb, long long int strideB,
+        const void* beta,
+        void* C, cudaDataType Ctype, int ldc, long long int strideC,
+        int batchCount,
+        cublasComputeType_t computeType,
+        cudaDataType scaleType
+    );
+    */
+  
+    long long strideA = (long long)(columns1 * columns2);   // V
+    long long strideB = (long long)(rows1 * columns1);  // S
+    long long strideC = (long long)(rows1 * columns2);   // O
+
+    int lda = columns2;    // A=V, opA=N → lda ≥ m=d
+    int ldb = columns1;   // B=S, opB=T → ldb ≥ k=Tk
+    int ldc = columns2;    // C=O,       → ldc ≥ m=d
+
+    status = cublasGemmStridedBatchedEx((cublasHandle_t)handle, CUBLAS_OP_N, CUBLAS_OP_N,
+        M, N, K, &alpha, 
+        (const void**)d_A,
+        CUDA_R_32F, lda, strideA, 
+        (const void**)d_B,
+        CUDA_R_32F, ldb, strideB, &beta,
+        (void**)d_C,
+        CUDA_R_32F, ldc, strideC, batchSize, CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasGemmBatched kernel execution error %s\n", cublasGetStatusString(status));
+        return JNI_ERR;
+    }
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasGemmBatchedEx...%d\n", (stop.tv_nsec - start.tv_nsec));
+    cudaError_t e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        printf("Post-GEMM sync error: %s\n", cudaGetErrorString(e));
+        return -206;
+    }
+   //printf("cublasGetVector d_C...\n");
+   // _timespec64_get(&start, TIME_UTC);
+    for (i = 0; i < batchSize; i++) {
+        //printf("CUDA cublasGemmBatchedEx getVector...%d\n", i);
+        status = cublasGetMatrix(rows1, columns2, sizeof(float), h_C[i], rows1, C[i], rows1);
+        if (status != CUBLAS_STATUS_SUCCESS) {
+            printf("!!!!cublasGemmBatchedEx device access error (read C) %s for batch # %d\n", cublasGetStatusString(status), i);
+            return JNI_ERR;
+        }
+        // _timespec64_get(&stop, TIME_UTC);
+        // printf("CUDA getVector d_C...%d\n", (stop.tv_nsec - start.tv_nsec));
+         //_timespec64_get(&start, TIME_UTC);
+         //printf("set h_C/mr float array region...\n");
+        env->SetFloatArrayRegion((jfloatArray)mrs[i], 0, nc, C[i]);
+        //printf("release A/m1 array region...\n");
+        env->ReleaseFloatArrayElements((jfloatArray)m1s[i], A[i], JNI_ABORT);
+        //printf("release B/m2 array region...\n");
+        env->ReleaseFloatArrayElements((jfloatArray)m2s[i], B[i], JNI_ABORT);
+        //printf("release C/mr array region...\n");
+        env->ReleaseFloatArrayElements((jfloatArray)mrs[i], C[i], JNI_ABORT);
+
+        cudaErr = cudaFree(h_A[i]);
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx memory free error (A) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+
+        cudaErr = cudaFree(h_B[i]);
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx memory free error (B) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+
+        cudaErr = cudaFree(h_C[i]);
+        if (cudaErr != cudaSuccess) {
+            printf("!!!!cublasGemmBatchedEx memory free error (C) %s for batch # %d\n", cudaGetErrorString(cudaErr), i);
+            return JNI_ERR;
+        }
+
+    }
+    /* JNI cleanup */
+    //printf("delete local class ref...\n");
+    env->DeleteLocalRef(aListClass);
+    /* Pointer Memory clean up */
+    //printf("free pointers A B C...\n");
+    free(A);
+    free(B);
+    free(C);
+    //printf("free pointers h_A h_B h_C...\n");
+    free(h_A);
+    free(h_B);
+    free(h_C);
+    //printf("free pointers d_A d_B d_C...\n");
+    cudaErr = cudaFree(d_A);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx memory free error (d_A) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaFree(d_B);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx memory free error (d_B) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    cudaErr = cudaFree(d_C);
+    if (cudaErr != cudaSuccess) {
+        printf("!!!!cublasGemmBatchedEx memory free error (d_C) %s\n", cudaGetErrorString(cudaErr));
+        return JNI_ERR;
+    }
+    //printf("free pointers m1s m2s mrs...\n");
+    free(m1s);
+    free(m2s);
+    free(mrs);
+    //_timespec64_get(&stop, TIME_UTC);
+    //printf("CUDA cublasGemmBatchedEx getVector and FREE ALL...%d\n", (stop.tv_nsec - start.tv_nsec));
+    return JNI_OK;
+}
+/**
+* Start of flat strided batch 2 and 1
+* Takes arrays of native float 32 and converts them to F16 before matrix multiply
+*/
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatchFlat2
 (JNIEnv* env, jclass clazz, jlong jHandle,
     jint rowsA, jint colsA, jfloatArray jA,
@@ -489,11 +672,24 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     jfloatArray jC, jint batchSize) {
 
     cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
-    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    cublasStatus_t cs = cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        printf("SetMathMode tensor failed: %d, falling back to DEFAULT\n", (int)cs);
+        cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
+    }
+    cs = cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        printf("SetPointerMode failed: %d\n", (int)cs);
+        return -203;
+    }
 
-    size_t oneA = (size_t)rowsA * colsA; // Tq*d
+    size_t oneA = (size_t)rowsA * colsA; // Tq*Tk
     size_t oneB = (size_t)rowsB * colsB; // Tk*d
-    size_t oneC = (size_t)rowsA * rowsB; // Tq*Tk
+    size_t oneC = (size_t)rowsA * colsB; // Tq*d
+
+    printf("Flat2 sizes: oneA=%zu oneB=%zu oneC=%zu totalA=%zu totalB=%zu totalC=%zu\n",
+        oneA, oneB, oneC,
+        oneA * batchSize, oneB * batchSize, oneC * batchSize);
 
     if (env->GetArrayLength(jA) != oneA * batchSize ||
         env->GetArrayLength(jB) != oneB * batchSize ||
@@ -516,44 +712,54 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     }
 
     __half* dA; __half* dB; float* dC;
-    if(cudaMalloc(&dA, hA.size() * sizeof(__half)) != cudaSuccess) return -200;
-    if(cudaMalloc(&dB, hB.size() * sizeof(__half)) != cudaSuccess) return -200;
-    if(cudaMalloc(&dC, oneC * batchSize * sizeof(float)) != cudaSuccess) return -200;
-    if(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
-    if(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice) != cudaSuccess) return -201;
+    if(ck(cudaMalloc(&dA, hA.size() * sizeof(__half)), "cudaMalloc dA")) return -200;
+    if(ck(cudaMalloc(&dB, hB.size() * sizeof(__half)), "cudaMalloc dB")) return -200;
+    if(ck(cudaMalloc(&dC, oneC * batchSize * sizeof(float)), "cudaMalloc dC")) return -200;
+    if(ck(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice), "cudaMemcpy H2D A")) return -201;
+    if(ck(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice), "cudaMemcpy H2D B")) return -201;
 
     float alpha = 1.0f, beta = 0.0f;
 
-    int d = colsB;
-    int Tq = rowsA;
-    int Tk = colsA;
+    int d = colsB;   // 64
+    int Tq = rowsA;  // e.g., 1
+    int Tk = colsA;  // e.g., 250
+
     int m = d, n = Tq, k = Tk;
-    long long strideA = (long long)(Tq * Tk);
-    long long strideB = (long long)(Tk * d);
-    long long strideC = (long long)(Tq * d);
 
+    long long strideA = (long long)(Tk * d);   // V
+    long long strideB = (long long)(Tq * Tk);  // S
+    long long strideC = (long long)(Tq * d);   // O
+
+    int lda = d;    // A=V, opA=N → lda ≥ m=d
+    int ldb = Tk;   // B=S, opB=T → ldb ≥ k=Tk
+    int ldc = d;    // C=O,       → ldc ≥ m=d
     printf("cublasGemmStridedBatchedFlat2 m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n", m, n, k, strideA, strideB, strideC);
-
     cublasStatus_t stat = cublasGemmStridedBatchedEx(
         handle,
-        CUBLAS_OP_T, CUBLAS_OP_T,
+        CUBLAS_OP_N, CUBLAS_OP_T,   // <-- changed
         m, n, k,
         &alpha,
-        dB, CUDA_R_16F, /*lda=*/k, strideB, // V batches
-        dA, CUDA_R_16F, /*ldb=*/k, strideA, // S batches
+        dB, CUDA_R_16F, lda, strideA,  // V
+        dA, CUDA_R_16F, ldb, strideB,  // S
         &beta,
-        dC, CUDA_R_32F, /*ldc=*/n, strideC,
+        dC, CUDA_R_32F, ldc, strideC,  // O
         batchSize,
         CUDA_R_32F,
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
     );
+
     if (stat != CUBLAS_STATUS_SUCCESS) {
         printf("!!!!cublasGemmStridedBatchedFlat2 kernel execution error %s\n", cublasGetStatusString(stat));
         return (int)stat;
     }
+    cudaError_t e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        printf("Post-GEMM sync error: %s\n", cudaGetErrorString(e));
+        return -206;
+    }
     // Copy results back into flat C
     for (int h = 0; h < batchSize; ++h) {
-        cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
+        if(ck(cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy D2H C")) return -202;
     }
 
     env->ReleaseFloatArrayElements(jA, fA, JNI_ABORT);
@@ -562,7 +768,9 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     cudaFree(dA); cudaFree(dB); cudaFree(dC);
     return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : (int)stat;
 }
-
+/*
+* Strided Batch Flat 1 processing F16 types after conversion from F32
+*/
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16StridedBatchFlat
 (JNIEnv* env, jclass clazz, jlong jHandle,
     jint rowsA, jint colsA, jfloatArray jA,
@@ -570,12 +778,29 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     jfloatArray jC, jint batchSize) {
 
     cublasHandle_t handle = reinterpret_cast<cublasHandle_t>(jHandle);
-    cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    cublasStatus_t cs = cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        printf("SetMathMode tensor failed: %d, falling back to DEFAULT\n", (int)cs);
+        cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH);
+    }
+    cs = cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    if (cs != CUBLAS_STATUS_SUCCESS) {
+        printf("SetPointerMode failed: %d\n", (int)cs);
+        return -203;
+    }
 
     size_t oneA = (size_t)rowsA * colsA; // Tq*d
     size_t oneB = (size_t)rowsB * colsB; // Tk*d
     size_t oneC = (size_t)rowsA * rowsB; // Tq*Tk
-
+    if (env->GetArrayLength(jA) != oneA * batchSize ||
+        env->GetArrayLength(jB) != oneB * batchSize ||
+        env->GetArrayLength(jC) != oneC * batchSize) {
+        printf("Flat size mismatch: jA:%d should equal (oneA:%d * batchSize:%d)and jB:%d should equal (oneB:%d * batchSize:%d) and jC:%d should equal (oneC:%d * batchSize:%d) \n",
+            env->GetArrayLength(jA), oneA ,batchSize,
+            env->GetArrayLength(jB), oneB , batchSize,
+            env->GetArrayLength(jC), oneC , batchSize);
+        return -100;
+    }
     jfloat* fA = env->GetFloatArrayElements(jA, nullptr);
     jfloat* fB = env->GetFloatArrayElements(jB, nullptr);
     jfloat* fC = env->GetFloatArrayElements(jC, nullptr);
@@ -591,29 +816,38 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
     }
 
     __half* dA; __half* dB; float* dC;
-    cudaMalloc(&dA, hA.size() * sizeof(__half));
-    cudaMalloc(&dB, hB.size() * sizeof(__half));
-    cudaMalloc(&dC, oneC * batchSize * sizeof(float));
-    cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice);
-    cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice);
+    if(ck(cudaMalloc(&dA, hA.size() * sizeof(__half)), "cudaMalloc dA")) return -200;
+    if(ck(cudaMalloc(&dB, hB.size() * sizeof(__half)), "cudaMalloc dB")) return -200;
+    if(ck(cudaMalloc(&dC, oneC * batchSize * sizeof(float)), "cudaMalloc dC")) return -200;
+    if(ck(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(__half), cudaMemcpyHostToDevice), "cudaMemcpy H2DA")) return -201;
+    if(ck(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(__half), cudaMemcpyHostToDevice), "cudaMemcpy H2DB")) return -201;
 
-    int m = rowsB, n = rowsA, k = colsA;
-    long long strideA = (long long)oneA;
-    long long strideB = (long long)oneB;
-    long long strideC = (long long)oneC;
     float alpha = 1.0f, beta = 0.0f;
 
-    printf("cublasGemmStridedBatchedFlat m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n", m, n, k, strideA, strideB, strideC);
+    int Tq = rowsA; // queries
+    int Tk = rowsB; // keys
+    int d = colsA; // head size
+
+    int m = Tk, n = Tq, k = d;
+
+    long long strideA = (long long)(Tk * d);  // K
+    long long strideB = (long long)(Tq * d);  // Q
+    long long strideC = (long long)(Tq * Tk); // S
+
+    int lda = d; // row length of K
+    int ldb = d; // row length of Q
+    int ldc = m; // Tk
+    //printf("cublasGemmStridedBatchedFlat m=%d n=%d k=%d strideA=%ld strideB=%ld strideC=%ld\n", m, n, k, strideA, strideB, strideC);
 
     cublasStatus_t stat = cublasGemmStridedBatchedEx(
         handle,
-        CUBLAS_OP_T, CUBLAS_OP_T,
+        CUBLAS_OP_N, CUBLAS_OP_N,
         m, n, k,
         &alpha,
-        dB, CUDA_R_16F, /*lda=*/k, strideB,
-        dA, CUDA_R_16F, /*ldb=*/k, strideA,
+        dB, CUDA_R_16F, lda, strideB,
+        dA, CUDA_R_16F, ldb, strideA,
         &beta,
-        dC, CUDA_R_32F, /*ldc=*/n, strideC,
+        dC, CUDA_R_32F, ldc, strideC,
         batchSize,
         CUDA_R_32F,
         CUBLAS_GEMM_DEFAULT_TENSOR_OP
@@ -622,9 +856,14 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16Stri
         printf("!!!!cublasGemmStridedBatchedFlat kernel execution error %s\n", cublasGetStatusString(stat));
         return (int)stat;
     }
+    cudaError_t e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        printf("Post-GEMM sync error: %s\n", cudaGetErrorString(e));
+        return -206;
+    }
     // Copy results back into flat C
     for (int h = 0; h < batchSize; ++h) {
-        cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost);
+        if(ck(cudaMemcpy(fC + h * oneC, dC + h * oneC, oneC * sizeof(float), cudaMemcpyDeviceToHost), "cudaMemcpy D2HC")) return -202;
     }
 
     env->ReleaseFloatArrayElements(jA, fA, JNI_ABORT);
@@ -777,7 +1016,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF32Stri
     }
     //_timespec64_get(&stop, TIME_UTC);
     //printf("CUDA cublasGemmStridedBatchedEx...%d\n", (stop.tv_nsec - start.tv_nsec));
-
+    cudaError_t e = cudaDeviceSynchronize();
+    if (e != cudaSuccess) {
+        printf("Post-GEMM sync error: %s\n", cudaGetErrorString(e));
+        return -206;
+    }
    //printf("cublasGetVector d_C...\n");
    // _timespec64_get(&start, TIME_UTC);
     for (i = 0; i < batchSize; i++) {

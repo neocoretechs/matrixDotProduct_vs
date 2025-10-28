@@ -176,6 +176,11 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDV(JNIEnv*, jclass,
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDS(JNIEnv*, jclass, jlong);
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDO(JNIEnv*, jclass, jlong);
+
+JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv*, jclass, jlong);
+
+JNIEXPORT jfloatArray JNICALL Java_com_neocoretechs_cublas_Attn_softMax(JNIEnv*, jclass, jfloatArray, jint, jint);
+
 #ifdef __cplusplus
 }
 #endif
