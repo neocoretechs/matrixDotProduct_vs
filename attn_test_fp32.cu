@@ -1,4 +1,4 @@
-// attention_test_fp32.cu
+﻿// attention_test_fp32.cu
 #include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cstdio>
@@ -83,7 +83,7 @@ static void cpu_attention_fp32(const float* hQ, const float* hK, const float* hV
 
 // ---------- Main test function ----------
 extern "C"
-int attention_test_fp32(
+int attention_test_fp32(cublasHandle_t handle,
     // Sizes
     int Tq, int Tk, int d,
     // Device pointers (row-major)
@@ -107,10 +107,6 @@ int attention_test_fp32(
     if (ldQ != d || ldK != d || ldV != d || ldO != d || ldS != Tk || ldA != Tk) {
         fprintf(stderr, "Leading dims mismatch (expect row-major)\n"); return -11;
     }
-
-    // Create cuBLAS handle and stream
-    cublasHandle_t handle;
-    CHECK_CUBLAS(cublasCreate(&handle));
     cudaStream_t stream;
     CHECK_CUDA(cudaStreamCreate(&stream));
     CHECK_CUBLAS(cublasSetStream(handle, stream));
@@ -118,7 +114,6 @@ int attention_test_fp32(
         // Best-effort: enable TF32 tensor ops mode (ignored on non-Ampere/Hopper)
         CHECK_CUBLAS(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH));
     }
-
     // Events for timing
     cudaEvent_t e0, e1, e2, e3, e4;
     CHECK_CUDA(cudaEventCreate(&e0));
@@ -162,7 +157,6 @@ int attention_test_fp32(
         d_O, ldO
     ));
     CHECK_CUDA(cudaEventRecord(e3, stream));
-
     // ---- Sync and timings
     CHECK_CUDA(cudaEventRecord(e4, stream));
     CHECK_CUDA(cudaEventSynchronize(e4));
@@ -194,7 +188,6 @@ int attention_test_fp32(
             // Not failing hard; you can tighten if needed
         }
     }
-
     // Cleanup
     cudaEventDestroy(e0); cudaEventDestroy(e1); cudaEventDestroy(e2); cudaEventDestroy(e3); cudaEventDestroy(e4);
     cublasDestroy(handle);
@@ -203,7 +196,6 @@ int attention_test_fp32(
     // Report
     fprintf(stdout, "QK^T: %.3f ms | Softmax: %.3f ms | AV: %.3f ms | Tq=%d Tk=%d d=%d\n",
         ms_qkt, ms_softmax, ms_av, Tq, Tk, d);
-
     return 0;
 }
 
@@ -235,4 +227,86 @@ JNIEXPORT jfloatArray JNICALL Java_com_neocoretechs_cublas_Attn_softMax
     jfloatArray jOut = env->NewFloatArray(len);
     env->SetFloatArrayRegion(jOut, 0, len, hOutput.data());
     return jOut;
+}
+
+struct Ctx {
+    cublasHandle_t handle;
+    int Tq, Tk, d;
+    // optional: persistent device buffers
+    float* dQ, * dK, * dV, * dO, * dS, * dA;
+};
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_initContext(
+    JNIEnv* env, jclass clazz, jlong cublasHandle, jint Tq, jint Tk, jint d, jint enableTf32) {
+    auto* ctx = new Ctx{ (cublasHandle_t)cublasHandle, Tq, Tk, d };
+    // Allocate persistent device buffers once
+    size_t bQ = size_t(Tq) * d * sizeof(float);
+    size_t bK = size_t(Tk) * d * sizeof(float);
+    size_t bV = size_t(Tk) * d * sizeof(float);
+    size_t bO = size_t(Tq) * d * sizeof(float);
+    size_t bS = size_t(Tq) * Tk * sizeof(float);
+    size_t bA = size_t(Tq) * Tk * sizeof(float);
+    cudaMalloc(&ctx->dQ, bQ);
+    cudaMalloc(&ctx->dK, bK);
+    cudaMalloc(&ctx->dV, bV);
+    cudaMalloc(&ctx->dO, bO);
+    cudaMalloc(&ctx->dS, bS);
+    cudaMalloc(&ctx->dA, bA);
+    // Optionally set TF32 math mode via cuBLAS, etc.
+    return reinterpret_cast<jlong>(ctx);
+}
+
+JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_freeContext(JNIEnv* env, jclass clazz, jlong h) {
+    auto* ctx = reinterpret_cast<Ctx*>(h);
+    if (!ctx) return;
+    cudaFree(ctx->dQ); cudaFree(ctx->dK); cudaFree(ctx->dV);
+    cudaFree(ctx->dO); cudaFree(ctx->dS); cudaFree(ctx->dA);
+    delete ctx;
+}
+
+static float* addr(JNIEnv* env, jobject buf) {
+    return static_cast<float*>(env->GetDirectBufferAddress(buf));
+}
+
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * env, jclass clazz, jlong h,
+    jobject jQ, jint ldQ, jobject jK, jint ldK, jobject jV, jint ldV,
+    jobject jO, jint ldO, jobject jS, jint ldS, jobject jA, jint ldA,
+    jint doCpuCheck, jobject jMsQKT, jobject jMsSM, jobject jMsAV) {
+
+    auto* ctx = reinterpret_cast<Ctx*>(h);
+    float* hQ = addr(env, jQ);
+    float* hK = addr(env, jK);
+    float* hV = addr(env, jV);
+    float* hO = addr(env, jO);
+    float* hS = addr(env, jS);
+    float* hA = addr(env, jA);
+
+    float* msQKT = addr(env, jMsQKT);
+    float* msSM = addr(env, jMsSM);
+    float* msAV = addr(env, jMsAV);
+
+    size_t bQ = size_t(ctx->Tq) * ctx->d * sizeof(float);
+    size_t bK = size_t(ctx->Tk) * ctx->d * sizeof(float);
+    size_t bV = size_t(ctx->Tk) * ctx->d * sizeof(float);
+    size_t bO = size_t(ctx->Tq) * ctx->d * sizeof(float);
+    size_t bS = size_t(ctx->Tq) * ctx->Tk * sizeof(float);
+    size_t bA = size_t(ctx->Tq) * ctx->Tk * sizeof(float);
+
+    // Host→Device (persistent device buffers)
+    cudaMemcpy(ctx->dQ, hQ, bQ, cudaMemcpyHostToDevice);
+    cudaMemcpy(ctx->dK, hK, bK, cudaMemcpyHostToDevice);
+    cudaMemcpy(ctx->dV, hV, bV, cudaMemcpyHostToDevice);
+
+    int ret = attention_test_fp32(ctx->handle, ctx->Tq, ctx->Tk, ctx->d,
+        ctx->dQ, ldQ, ctx->dK, ldK, ctx->dV, ldV,
+        ctx->dO, ldO, ctx->dS, ldS, ctx->dA, ldA,
+        /*enable_tf32=*/1, doCpuCheck,
+        msQKT, msSM, msAV);
+
+    // Device→Host
+    cudaMemcpy(hO, ctx->dO, bO, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hS, ctx->dS, bS, cudaMemcpyDeviceToHost);
+    cudaMemcpy(hA, ctx->dA, bA, cudaMemcpyDeviceToHost);
+
+    return ret;
 }

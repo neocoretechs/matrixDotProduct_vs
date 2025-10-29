@@ -181,6 +181,17 @@ JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv*, jclass
 
 JNIEXPORT jfloatArray JNICALL Java_com_neocoretechs_cublas_Attn_softMax(JNIEnv*, jclass, jfloatArray, jint, jint);
 
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionTestFp32(JNIEnv*, jclass,
+	jint, jint, jint, jfloatArray, jint, jfloatArray, jint, jfloatArray, jint, jfloatArray, jint,
+	jfloatArray, jint, jfloatArray, jint, jint, jint, jfloatArray, jfloatArray, jfloatArray);
+
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv*, jclass, jlong,
+	jobject, jint, jobject, jint, jobject, jint, jobject, jint, jobject, jint, jobject, jint, 
+	jint, jobject, jobject, jobject);
+
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_initContext(JNIEnv*, jclass , jlong, jint, jint, jint, jint);
+
+JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_freeContext(JNIEnv*, jclass, jlong);
 #ifdef __cplusplus
 }
 #endif
