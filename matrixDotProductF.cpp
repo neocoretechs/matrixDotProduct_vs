@@ -39,6 +39,11 @@
 
 #include "com_neocoretechs_cublas_Gemm.h"
 
+#define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
+  fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
+
+#define CHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
+  fprintf(stderr, "cuBLAS error %d at %s:%d\n", (int)st, __FILE__, __LINE__); return -2; } } while(0)
 
 timespec stop, start;
 
@@ -950,7 +955,6 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductFCPUBat
 JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JNIEnv* env, jclass clazz) {
     size_t freeMem = 0, totalMem = 0;
     cudaError_t err = cudaMemGetInfo(&freeMem, &totalMem);
-
     jlongArray result = env->NewLongArray(2);
     if (result == NULL) return NULL;
 
@@ -964,7 +968,6 @@ JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JN
         vals[0] = -1;
         vals[1] = -1;
     }
-
     env->SetLongArrayRegion(result, 0, 2, vals);
     return result;
 }
@@ -979,30 +982,25 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdot(JNIEnv* env, jclas
     cudaMalloc(&dx, n * sizeof(float));
     cudaMalloc(&dy, n * sizeof(float));
     cudaMalloc(&dres, sizeof(float));
-
     cudaMemcpy(dx, hx, n * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(dy, hy, n * sizeof(float), cudaMemcpyHostToDevice);
-
     float hostRes = 0.0f;
     cublasStatus_t stat = cublasSdot((cublasHandle_t)handle, n, dx, incx, dy, incy, &hostRes);
-
     // Copy result back
     env->SetFloatArrayRegion(result, 0, 1, &hostRes);
-
     // Cleanup
     cudaFree(dx);
     cudaFree(dy);
     cudaFree(dres);
     env->ReleaseFloatArrayElements(x, hx, JNI_ABORT);
     env->ReleaseFloatArrayElements(y, hy, JNI_ABORT);
-
     return (stat == CUBLAS_STATUS_SUCCESS) ? 0 : -1;
 }
 
 // Device buffer helpers
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMallocBytes(JNIEnv* env, jclass clazz, jlong bytes) {
     void* dptr = nullptr;
-    cudaMalloc(&dptr, (size_t)bytes);
+    CHECK_CUDA(cudaMalloc(&dptr, (size_t)bytes));
     return (jlong)dptr;
 }
 
@@ -1012,20 +1010,26 @@ JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Gemm_cudaFreePtr(JNIEnv* env
 
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemcpyHtoD(JNIEnv* env, jclass clazz, jlong dptr, jobject srcBuffer, jlong bytes) {
     void* hptr = env->GetDirectBufferAddress(srcBuffer);
-    if (!hptr) return -2;
-    cudaError_t err = cudaMemcpy((void*)dptr, hptr, (size_t)bytes, cudaMemcpyHostToDevice);
-    return err == cudaSuccess ? 0 : (jint)err;
+    if (!hptr) {
+        printf("!!!!cudaMemcpyHtoD GetDirectBufferAddress failed!\n");
+        return -2;
+    }
+    CHECK_CUDA(cudaMemcpy((void*)dptr, hptr, (size_t)bytes, cudaMemcpyHostToDevice));
+    return 0;
 }
 
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemcpyDtoH(JNIEnv* env, jclass clazz, jobject dstBuffer, jlong dptr, jlong bytes) {
     void* hptr = env->GetDirectBufferAddress(dstBuffer);
-    if (!hptr) return -2;
-    cudaError_t err = cudaMemcpy(hptr, (void*)dptr, (size_t)bytes, cudaMemcpyDeviceToHost);
-    return err == cudaSuccess ? 0 : (jint)err;
+    if (!hptr) {
+        printf("!!!!cudaMemcpyDtoH GetDirectBufferAddress failed!\n");
+        return -2;
+    }
+    CHECK_CUDA(cudaMemcpy(hptr, (void*)dptr, (size_t)bytes, cudaMemcpyDeviceToHost));
+    return 0;
 }
 
 // Device-pointer dot (no array marshalling, no per-call mallocs)
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdotDevice(JNIEnv* env, jclass clazz, jlong handle, jint n, jlong dX, jint incx, jlong dY, jint incy, jlong dResult) {
-    cublasStatus_t stat = cublasSdot( (cublasHandle_t)handle, n, (const float*)dX, incx, (const float*)dY, incy, (float*)dResult);
-    return stat == CUBLAS_STATUS_SUCCESS ? 0 : -1;
+    CHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, n, (const float*)dX, incx, (const float*)dY, incy, (float*)dResult));
+    return 0;
 }
