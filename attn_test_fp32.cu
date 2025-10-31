@@ -410,7 +410,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * 
 * 2 - F16
 * 3 - B16
 */
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jclass clazz, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
     // Get direct buffer address
     uint8_t* buffer = static_cast<uint8_t*>(env->GetDirectBufferAddress(byteBuffer));
     if(buffer == NULL) {
@@ -426,6 +426,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     float* d_output; // Device pointer
     size_t numFloats = length / typeSize;
     // Allocate memory on the GPU
+    printf("***Preparing to allocate %d floats total=%d\n", numFloats, (numFloats * sizeof(float)));
     CHECK_CUDA(cudaMalloc((void**)&d_output, numFloats * sizeof(float)));
     int numBlocks = numFloats / blockSize; // how many quant blocks
     int totalElems = numBlocks * blockSize;
