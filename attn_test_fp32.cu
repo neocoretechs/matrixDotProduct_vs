@@ -5,7 +5,11 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <cuda_fp16.h>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
 #include "com_neocoretechs_cublas_Gemm.h"
+
 // ---------- Error helpers ----------
 #define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
@@ -71,6 +75,25 @@ __global__ void convertQ4ToFloat(uint8_t* input, float* output, int blockSize, i
     else
         q = (int8_t)((*(int8_t*)&input[blockOffset + headerBytes + modIndex - blockSize/2] >> 4) & 0x0F);
     output[index] = (float)q * scale;
+}
+// FP16 (IEEE half) → float
+__global__ void convertF16ToFloat(const uint8_t* __restrict__ input, float* __restrict__ output, int numElems, int elemStrideBytes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numElems) return;
+    const uint8_t* src = input + idx * elemStrideBytes;
+    uint16_t hbits = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+    __half h = *reinterpret_cast<const __half*>(&hbits);
+    output[idx] = __half2float(h);
+}
+
+// BF16 → float (high 16 bits of f32)
+__global__ void convertBF16ToFloat(const uint8_t* __restrict__ input, float* __restrict__ output, int numElems, int elemStrideBytes) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numElems) return;
+    const uint8_t* src = input + idx * elemStrideBytes;
+    uint16_t bf16 = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+    uint32_t bits = ((uint32_t)bf16) << 16;
+    output[idx] = static_cast<float>(bits);
 }
 
 static int softmax_rows_fp32(const float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
@@ -417,10 +440,10 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
             convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
             break;
         case 2: // F16
-            // Launch kernel for F16 conversion
+            convertF16ToFloat << <grid, threads >> > (buffer, d_output, totalElems, typeSize);
             break;
         case 3: // BF16
-            // Launch kernel for BF16 conversion
+            convertBF16ToFloat << <grid, threads >> > (buffer, d_output, totalElems, typeSize);
             break;
         default:
             // Handle unsupported format
