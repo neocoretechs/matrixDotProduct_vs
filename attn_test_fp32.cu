@@ -39,6 +39,40 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
 
+__global__ void convertQ8ToFloat(uint8_t* input, float* output,int blockSize, int typeSize, int headerBytes) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int blockIndex = index / blockSize;
+    int withinBlock = index % blockSize;
+    int blockOffset = blockIndex * typeSize;
+    // Decode scale from header (assume FP16 at offset 0)
+    uint16_t scaleBits = (uint16_t)input[blockOffset] |
+        ((uint16_t)input[blockOffset + 1] << 8);
+    __half hscale = *reinterpret_cast<__half*>(&scaleBits);
+    float scale = __half2float(hscale);
+    // Load quantized value (signed 8‑bit here)
+    int8_t q = *(int8_t*)&input[blockOffset + headerBytes + withinBlock];
+    output[index] = (float)q * scale;
+}
+
+__global__ void convertQ4ToFloat(uint8_t* input, float* output, int blockSize, int typeSize, int headerBytes) {
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int blockIndex = index / blockSize;
+    int blockOffset = blockIndex * typeSize;
+    // Decode scale from header (assume FP16 at offset 0)
+    uint16_t scaleBits = (uint16_t)input[blockOffset] |
+        ((uint16_t)input[blockOffset + 1] << 8);
+    __half hscale = *reinterpret_cast<__half*>(&scaleBits);
+    float scale = __half2float(hscale);
+    int modIndex = index % blockSize;
+    int8_t q;
+    if (modIndex < blockSize / 2)
+        // Load quantized value (signed 8‑bit here)
+        q = *(int8_t*)&input[blockOffset + headerBytes + modIndex] & 0x0F;
+    else
+        q = (int8_t)((*(int8_t*)&input[blockOffset + headerBytes + modIndex - blockSize/2] >> 4) & 0x0F);
+    output[index] = (float)q * scale;
+}
+
 static int softmax_rows_fp32(const float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
     int threads = 128;
     int blocks = (rows + threads - 1) / threads;
@@ -346,4 +380,53 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * 
 
     return ret;
 }
-
+/*
+* Function to convert GGUF quantized types to float using CUDA
+* 0 - Q4_0
+* 1 - Q8_0
+* 2 - F16
+* 3 - B16
+*/
+JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
+    // Get direct buffer address
+    uint8_t* buffer = static_cast<uint8_t*>(env->GetDirectBufferAddress(byteBuffer));
+    if(buffer == NULL) {
+        // Handle error: buffer is not direct
+        fprintf(stderr, "convertBufferToFloat -> ByteBuffer is not direct!\n");
+        return -100;
+    }
+    size_t length = env->GetDirectBufferCapacity(byteBuffer);
+    float* d_output; // Device pointer
+    size_t numFloats = length / typeSize;
+    // Allocate memory on the GPU
+    CHECK_CUDA(cudaMalloc((void**)&d_output, numFloats * sizeof(float)));
+    int numBlocks = numFloats / blockSize; // how many quant blocks
+    int totalElems = numBlocks * blockSize;
+    dim3 threads(256);
+    dim3 grid((totalElems + threads.x - 1) / threads.x);
+    switch(format) {
+        case 0: // Q4_0
+            // Conversion logic for q4_0 to float on the GPU
+            convertQ4ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
+            break;
+        case 1: // Q8_0
+            convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
+            break;
+        case 2: // F16
+            // Launch kernel for F16 conversion
+            break;
+        case 3: // BF16
+            // Launch kernel for BF16 conversion
+            break;
+        default:
+            // Handle unsupported format
+            break;
+    }
+    // Copy the results from device to host (assuming you need results back on CPU)
+    float* h_output = (float*)malloc(numFloats * sizeof(float)); // Host pointer
+    CHECK_CUDA(cudaMemcpy(h_output, d_output, numFloats * sizeof(float), cudaMemcpyDeviceToHost));
+    // Use h_output as needed...
+    // Clean up
+    free(h_output);
+    cudaFree(d_output); // Free device memory
+}
