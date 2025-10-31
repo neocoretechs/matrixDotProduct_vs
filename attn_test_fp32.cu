@@ -8,6 +8,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
 
 // ---------- Error helpers ----------
@@ -42,12 +43,16 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
-
+/*
 __global__ void convertQ8ToFloat(uint8_t* input, float* output,int blockSize, int typeSize, int headerBytes) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
+    //if (index < 8) {
+        printf("idx=%d b=%d i=%d base=%d off=%d  typeSize=%d hdr=%d\n",
+            index, blockIndex, withinBlock, blockOffset, blockOffset + headerBytes + withinBlock, typeSize, headerBytes);
+   //}
     // Decode scale from header (assume FP16 at offset 0)
     uint16_t scaleBits = (uint16_t)input[blockOffset] |
         ((uint16_t)input[blockOffset + 1] << 8);
@@ -57,7 +62,7 @@ __global__ void convertQ8ToFloat(uint8_t* input, float* output,int blockSize, in
     int8_t q = *(int8_t*)&input[blockOffset + headerBytes + withinBlock];
     output[index] = (float)q * scale;
 }
-
+*/
 __global__ void convertQ4ToFloat(uint8_t* input, float* output, int blockSize, int typeSize, int headerBytes) {
     int index = blockIdx.x * blockDim.x + threadIdx.x;
     int blockIndex = index / blockSize;
@@ -96,6 +101,66 @@ __global__ void convertBF16ToFloat(const uint8_t* __restrict__ input, float* __r
     output[idx] = static_cast<float>(bits);
 }
 
+inline int clz32_portable(unsigned int x) {
+    if (x == 0) return 32;
+    int n = 0;
+    while ((x & 0x80000000u) == 0) {
+        n++;
+        x <<= 1;
+    }
+    return n;
+}
+
+// helper: convert IEEE 754 half-precision (binary16) to float
+inline float halfToFloat(uint16_t h) {
+    uint16_t h_exp = (h & 0x7C00u);
+    uint16_t h_sig = (h & 0x03FFu);
+    uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+    uint32_t exp;
+    uint32_t mant;
+    if (h_exp == 0x7C00u) { // Inf/NaN
+        exp = 0xFFu << 23;
+        mant = (uint32_t)h_sig << 13;
+    }
+    else if (h_exp != 0) { // normalized
+        exp = ((h_exp >> 10) + (127 - 15)) << 23;
+        mant = (uint32_t)h_sig << 13;
+    }
+    else if (h_sig != 0) { // subnormal
+        // normalize
+        int shift = clz32_portable(h_sig) - 21; // count leading zeros
+        h_sig <<= shift;
+        exp = (127 - 15 - shift + 1) << 23;
+        mant = (uint32_t)(h_sig & 0x3FFu) << 13;
+    }
+    else { // zero
+        exp = mant = 0;
+    }
+    uint32_t bits = sign | exp | mant;
+    float f;
+    std::memcpy(&f, &bits, sizeof(f));
+    return f;
+}
+
+// CPU conversion for Q8_0
+std::vector<float> convertQ8ToFloat(const uint8_t* input, size_t len, int blockSize = 32, int headerBytes = 2) {
+    int typeSize = blockSize + headerBytes;
+    size_t blocks = len / typeSize;
+    std::vector<float> out(blocks * blockSize);
+    size_t pos = 0;
+    for (size_t b = 0; b < blocks; ++b) {
+        size_t base = b * typeSize;
+        uint16_t scaleBits = (uint16_t)input[base]
+            | ((uint16_t)input[base + 1] << 8);
+        float scale = halfToFloat(scaleBits);
+
+        for (int i = 0; i < blockSize; ++i) {
+            int8_t q = *(int8_t*)&input[base + headerBytes + i];
+            out[pos++] = (float)q * scale;
+        }
+    }
+    return out;
+}
 static int softmax_rows_fp32(const float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
     int threads = 128;
     int blocks = (rows + threads - 1) / threads;
@@ -403,6 +468,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * 
 
     return ret;
 }
+
 /*
 * Function to convert GGUF quantized types to float using CUDA
 * 0 - Q4_0
@@ -410,7 +476,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * 
 * 2 - F16
 * 3 - B16
 */
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jclass clazz, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jclass clazz, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
     // Get direct buffer address
     uint8_t* buffer = static_cast<uint8_t*>(env->GetDirectBufferAddress(byteBuffer));
     if(buffer == NULL) {
@@ -426,19 +492,39 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     float* d_output; // Device pointer
     size_t numFloats = length / typeSize;
     // Allocate memory on the GPU
-    printf("***Preparing to allocate %d floats total=%d\n", numFloats, (numFloats * sizeof(float)));
-    CHECK_CUDA(cudaMalloc((void**)&d_output, numFloats * sizeof(float)));
+    int blocks = (int)((size_t)length / (size_t)typeSize);
+    int totalElems = blocks * blockSize;
+    size_t outBytes = (size_t)totalElems * sizeof(float);
+    printf("***Preparing to allocate format %d  -- %d floats total=%d\n", format, numFloats, (numFloats * sizeof(float)));
+    // Before launch (native side)
+    fprintf(stderr, "***Allocating %d floats (bytes=%zu) blocks=%d blockSize=%d len=%lld\n",
+        totalElems, outBytes, blocks, blockSize, (long long)length);
+
+    if (headerBytes != 2) { fprintf(stderr, "Bad headerBytes\n"); return -1; }
+    if (typeSize != headerBytes + blockSize) {
+        fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
+        return -1;
+    }
+    if ((size_t)length % (size_t)typeSize != 0) {
+        fprintf(stderr, "length %% typeSize != 0\n"); return -1;
+    }
+
+    int total = blocks * blockSize;
+    dim3 threads(256), grid((total + threads.x - 1) / threads.x);
+    CHECK_CUDA(cudaMalloc((void**)&d_output, outBytes));
+   
     int numBlocks = numFloats / blockSize; // how many quant blocks
-    int totalElems = numBlocks * blockSize;
-    dim3 threads(256);
-    dim3 grid((totalElems + threads.x - 1) / threads.x);
+    //dim3 threads(256);
+    //dim3 grid((totalElems + threads.x - 1) / threads.x);
+    std::vector<float> dout;
     switch(format) {
         case 0: // Q4_0
             // Conversion logic for q4_0 to float on the GPU
             convertQ4ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
             break;
         case 1: // Q8_0
-            convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
+           // convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
+            dout = convertQ8ToFloat(buffer, blockSize, typeSize, headerBytes);
             break;
         case 2: // F16
             convertF16ToFloat << <grid, threads >> > (buffer, d_output, totalElems, typeSize);
@@ -457,5 +543,9 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     // Clean up
     //free(h_output);
     //cudaFree(d_output); // Free device memory
-    return (jlong)d_output;
+    float* d_tensor = nullptr;
+    size_t bytes = dout.size() * sizeof(float);
+    cudaMalloc((void**)&d_tensor, bytes);
+    cudaMemcpy(d_tensor, dout.data(), bytes, cudaMemcpyHostToDevice);
+    return  (jlong)(uintptr_t)d_tensor;
 }
