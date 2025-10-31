@@ -387,7 +387,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * 
 * 2 - F16
 * 3 - B16
 */
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
+JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jobject obj, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
     // Get direct buffer address
     uint8_t* buffer = static_cast<uint8_t*>(env->GetDirectBufferAddress(byteBuffer));
     if(buffer == NULL) {
@@ -396,6 +396,10 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JN
         return -100;
     }
     size_t length = env->GetDirectBufferCapacity(byteBuffer);
+    if (length % typeSize != 0) {
+        fprintf(stderr, "length of buffer not a multiple of typeSize!\n");
+        return -101;
+    }
     float* d_output; // Device pointer
     size_t numFloats = length / typeSize;
     // Allocate memory on the GPU
@@ -423,10 +427,11 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JN
             break;
     }
     // Copy the results from device to host (assuming you need results back on CPU)
-    float* h_output = (float*)malloc(numFloats * sizeof(float)); // Host pointer
-    CHECK_CUDA(cudaMemcpy(h_output, d_output, numFloats * sizeof(float), cudaMemcpyDeviceToHost));
+    //float* h_output = (float*)malloc(numFloats * sizeof(float)); // Host pointer
+    //CHECK_CUDA(cudaMemcpy(h_output, d_output, numFloats * sizeof(float), cudaMemcpyDeviceToHost));
     // Use h_output as needed...
     // Clean up
-    free(h_output);
-    cudaFree(d_output); // Free device memory
+    //free(h_output);
+    //cudaFree(d_output); // Free device memory
+    return (jlong)d_output;
 }
