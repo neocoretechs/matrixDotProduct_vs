@@ -124,7 +124,6 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF(JNIEn
     const int n2 = rows2 * columns2;
     const int n1 = rows1 * columns1;
     const int nc = rows1 * columns2;
-    int i;
     /* for test vs CPU
     float error_norm;
     float ref_norm;
@@ -779,7 +778,6 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductFCPU(JN
     const int n2 = rows2 * columns2;
     const int n1 = rows1 * columns1;
     const int nc = rows1 * columns2;
-    int i;
     /* for test vs CPU
     float error_norm;
     float ref_norm;

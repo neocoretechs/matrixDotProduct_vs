@@ -79,7 +79,6 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_matrixDotProductF16(JNI
     const int n2 = rows2 * columns2;
     const int n1 = rows1 * columns1;
     const int nc = rows1 * columns2;
-    int i;
    
     //printf("Get Float h_A...\n");
     h_A = env->GetFloatArrayElements(m1, NULL);

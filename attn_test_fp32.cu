@@ -295,6 +295,7 @@ static int softmax_rows_fp32(const float* d_S, float* d_A, int rows, int cols, i
     int blocks = (rows + threads - 1) / threads;
     row_softmax_fp32 << <blocks, threads, 0, stream >> > (d_S, d_A, rows, cols, ldS, ldA);
     CHECK_CUDA(cudaGetLastError());
+    return 0;
 }
 
 // ---------- CPU baseline (optional, small sizes) ----------
@@ -629,16 +630,11 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     fprintf(stderr, "***Allocating %d floats (bytes=%zu) blocks=%d blockSize=%d len=%lld\n",
         totalElems, outBytes, blocks, blockSize, (long long)length);
     if (headerBytes != 2) { fprintf(stderr, "Bad headerBytes\n"); return -1; }
-    if (typeSize != headerBytes + blockSize) {
-        fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
-        return -1;
-    }
+ 
     if ((size_t)length % (size_t)typeSize != 0) {
         fprintf(stderr, "length %% typeSize != 0\n"); return -1;
     }
-    int total = blocks * blockSize;
     CHECK_CUDA(cudaMalloc((void**)&d_output, outBytes));
-    int numBlocks = numFloats / blockSize; // how many quant blocks
     //dim3 threads(256);
     //dim3 grid((totalElems + threads.x - 1) / threads.x);
     //convertQ4ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
@@ -646,8 +642,16 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     switch(format) {
         case 0: // Q4_0
             // Conversion logic for q4_0 to float on the GPU
+            if (typeSize != headerBytes + blockSize) {
+                fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
+                return -1;
+            }
             return (jlong)(uintptr_t)toDeviceFloatQ4(buffer, outBytes, blockSize, typeSize, headerBytes);
         case 1: // Q8_0
+            if (typeSize != headerBytes + blockSize) {
+                fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
+                return -1;
+            }
            // convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
            return (jlong)(uintptr_t)toDeviceFloatQ8(buffer, outBytes, blockSize, typeSize, headerBytes);
            //dout = convertQ8ToFloat(buffer, blockSize, typeSize, headerBytes);
