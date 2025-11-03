@@ -120,7 +120,7 @@
     <ClInclude Include="helpers.h" />
   </ItemGroup>
   <ItemGroup>
-    <CudaCompile Include="attn_test_fp32.cu" />
+    <CudaCompile Include="attn_fp32.cu" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

@@ -200,6 +200,10 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemcpyDtoH(JNIEnv*,
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdotDevice(JNIEnv*, jclass, jlong, jint, jlong, jint, jlong, jint, jlong);
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv*, jclass, jobject, jint, jint, jint, jint);
+
+JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
+
+float sdotSlice(const float*, const float*, int);
 #ifdef __cplusplus
 }
 #endif
