@@ -209,9 +209,9 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
 
 JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
 
-EXPORT float sdotSlice(const float*, const float*, int);
+EXPORT float sdotSlice(uint64_t, const float*, const float*, int);
 
-EXPORT float sdotSliceQ8(const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSliceQ8(uint64_t, const uint8_t*, const float*, int, int, int, int, int);
 
 EXPORT float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
 
@@ -219,6 +219,11 @@ EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
 
 EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
 
+EXPORT uint64_t cublasHandle();
+
+EXPORT void cublasHandleDestroy(uint64_t);
+
+EXPORT int cudaGetMemInfo(size_t*, size_t*);
 #ifdef __cplusplus
 }
 #endif

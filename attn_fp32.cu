@@ -1,12 +1,10 @@
-﻿// attention_test_fp32.cu
-#include <cuda_runtime.h>
+﻿#include <cuda_runtime.h>
 #include <cublas_v2.h>
 #include <cstdio>
 #include <cmath>
 #include <vector>
 #include <algorithm>
 #include <cuda_fp16.h>
-#include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
@@ -15,7 +13,6 @@
 // ---------- Error helpers ----------
 #define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
-
 #define CHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); return -2; } } while(0)
 #define PCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
@@ -24,6 +21,8 @@
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); goto fail; } } while(0)
 #define PCHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); return nullptr; } } while(0)
+#define GOCHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
+  fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); goto fail; } } while(0)
 // ---------- Row-wise softmax ----------
 __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict__ A,
     int rows, int cols, int ldS, int ldA) {
@@ -776,45 +775,44 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env
         if (dOut) cudaFree(dOut);
        return NAN;
  } 
-float sdotSlice(const float* q, const float* k, int headSize) {
+#ifdef __cplusplus
+extern "C" {
+#endif
+EXPORT float sdotSlice(uint64_t handle, const float* q, const float* k, int headSize) {
     float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
     float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    /*
     int threads = 256;
     int blocks = (headSize + threads - 1) / threads;
     sdotKernel << <blocks, threads >> > (dQ, dK, headSize, dPartial);
     ce = cudaGetLastError(); if (ce) goto fail;
     reduceKernel << <blocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
+    */
+    float result = 0.0f;
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     ce = cudaGetLastError(); if (ce) goto fail;
-    float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut);
+    //float result = NAN;
+    //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
+    cudaFree(dQ); cudaFree(dK);
     return result;
 fail:
     if (dQ) cudaFree(dQ);
     if (dK) cudaFree(dK);
-    if (dPartial) cudaFree(dPartial);
-    if (dOut) cudaFree(dOut);
     return NAN;
 }
-float sdotSliceQ8(const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
+EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
     float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
     float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
     float* h_stage = NULL;
     ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
@@ -832,40 +830,38 @@ float sdotSliceQ8(const uint8_t* q, const float* k, int headSize, int blockSize,
         int8_t quant = *(int8_t*)&q[blockOffset + headerBytes + withinBlockIndex];
         uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
         float scale = halfToFloat(bits);
-        printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
-            b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
+        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
+        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
         h_stage[pos++] = (float)quant * scale;
     }
     ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    /*
     int threads = 256;
     int threadBlocks = (headSize + threads - 1) / threads;
     sdotKernel << <threadBlocks, threads >> > (dQ, dK, headSize, dPartial);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
+    */
+    float result = 0.0f;
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut); cudaFreeHost(h_stage);
+    //float result = NAN;
+    //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
+    cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
     fail:
         if (dQ) cudaFree(dQ);
         if (dK) cudaFree(dK);
-        if (dPartial) cudaFree(dPartial);
-        if (dOut) cudaFree(dOut);
         if(h_stage)cudaFreeHost(h_stage);
         return NAN;
  }
 float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize, int blocks, int typeSize, int headerBytes) {
-    float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
+    float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
-    float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
     // from q to dQ device
     float* h_stage = NULL;
@@ -900,21 +896,20 @@ float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize,
     }
     ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    /*
     int threads = 256;
     int threadBlocks = (headSize + threads - 1) / threads;
     sdotKernel << <threadBlocks, threads >> > (dQ, dK, headSize, dPartial);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    */
     float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut); cudaFreeHost(h_stage);
+    cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
 fail:
     if (dQ) cudaFree(dQ);
     if (dK) cudaFree(dK);
-    if (dPartial) cudaFree(dPartial);
-    if (dOut) cudaFree(dOut);
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
@@ -1000,3 +995,45 @@ fail:
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;;
 }
+uint64_t cublasHandle() {
+    cublasStatus_t status;
+    cublasHandle_t handle = NULL;
+    /* Initialize CUBLAS */
+    status = cublasCreate(&handle);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasCreate CUBLAS initialization error %s\n", cublasGetStatusString(status));
+        return NULL;
+    }
+    cudaStream_t stream;
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    cublasSetStream(handle, stream);
+    //cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    // once per handle
+    // cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+    // For FP16 GEMMs, use CUDA_R_16F inputs + tensor ops kernels
+    // HOST mode means cuBLAS will synchronize the stream, write the value back into host memory, and only then return.
+    // cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    // Device mode in this context means:
+    // Keep data resident on the GPU as much as possible.
+    // Don’t malloc / free / copy every call — allocate once, reuse buffers, and only transfer when you must.
+    // Dequantize on device instead of staging on host.
+    // A device kernel runs in parallel, writing directly into.That way you skip the pinned host buffer and the extra PCIe copy.
+    // Fuse operations where possible.
+    // For example, a custom kernel could dequantize Q8 and accumulate the dot product against K in one pass, avoiding even the intermediate .
+    // Use cuBLAS / cuDNN primitives when they fit.
+    // already device mode — it never brings data back to host until you copy the scalar result.
+    //The kernel writes into that device buffer asynchronously, and you can copy it back later 
+    cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    printf("Created CUBLAS handle %x\n",handle);
+    return (uint64_t)handle;
+}
+void cublasHandleDestroy(uint64_t handle) {
+    cublasDestroy((cublasHandle_t) handle);
+}
+int cudaGetMemInfo(size_t* free, size_t* total) {
+    CHECK_CUDA(cudaMemGetInfo(free, total));
+    return 0;
+}
+#ifdef __cplusplus
+}
+#endif
