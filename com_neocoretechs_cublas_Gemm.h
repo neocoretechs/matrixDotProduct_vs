@@ -4,6 +4,12 @@
 
 #ifndef _Included_com_neocoretechs_cublas_Gemm
 #define _Included_com_neocoretechs_cublas_Gemm
+#ifdef _WIN32
+#  define EXPORT __declspec(dllexport)
+#else
+#  define EXPORT
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -203,15 +209,15 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
 
 JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
 
-float sdotSlice(const float*, const float*, int);
+EXPORT float sdotSlice(const float*, const float*, int);
 
-float sdotSliceQ8(const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSliceQ8(const uint8_t*, const float*, int, int, int, int, int);
 
-float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
 
-float sdotSliceF16(const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
 
-float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
 
 #ifdef __cplusplus
 }
