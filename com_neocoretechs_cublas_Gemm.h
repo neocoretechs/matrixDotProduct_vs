@@ -213,11 +213,11 @@ EXPORT float sdotSlice(uint64_t, const float*, const float*, int);
 
 EXPORT float sdotSliceQ8(uint64_t, const uint8_t*, const float*, int, int, int, int, int);
 
-EXPORT float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSliceQ4(uint64_t, const uint8_t*, const float*, int, int, int, int, int);
 
-EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceF16(uint64_t, const uint8_t*, const float*, int, int, int);
 
-EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceBF16(uint64_t, const uint8_t*, const float*, int, int, int);
 
 EXPORT uint64_t cublasHandle();
 

@@ -794,9 +794,12 @@ EXPORT float sdotSlice(uint64_t handle, const float* q, const float* k, int head
     ce = cudaGetLastError(); if (ce) goto fail;
     reduceKernel << <blocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     */
-    float result = 0.0f;
+    float result = -12345.0f;
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSlice size=%d q[0]=%f k[0]=%f\n", headSize, q[0], k[0]);
     GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     ce = cudaGetLastError(); if (ce) goto fail;
+    //GOCHECK_CUDA(cudaDeviceSynchronize());
     //float result = NAN;
     //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK);
@@ -807,7 +810,7 @@ fail:
     return NAN;
 }
 EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
-    float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
+    float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
@@ -843,9 +846,12 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     */
-    float result = 0.0f;
+    float result = -123435.0f;
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSliceQ8 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
     GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    //GOCHECK_CUDA(cudaDeviceSynchronize());
     //float result = NAN;
     //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
@@ -856,7 +862,7 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
         if(h_stage)cudaFreeHost(h_stage);
         return NAN;
  }
-float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize, int blocks, int typeSize, int headerBytes) {
+float sdotSliceQ4(uint64_t handle, const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
@@ -880,7 +886,7 @@ float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize,
     //quant -= 8;
     //return quant * scale;
     size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
+    for (int b = index; b < (index + headSize); b++) {
         int blockIndex = b / blockSize;
         int blockOffset = blockIndex * typeSize;
         uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
@@ -904,7 +910,11 @@ float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize,
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     */
-    float result = NAN;
+    float result = -123435.0f;
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSliceQ4 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
 fail:
@@ -913,87 +923,83 @@ fail:
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
-float sdotSliceF16(const uint8_t* q, const float* k, int headSize, int blocks, int typeSize) {
-    float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
+float sdotSliceF16(uint64_t handle, const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
+    float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
-    float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
     // from q to dQ device
     float* h_stage = NULL;
     ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
     size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)q[base] | ((uint16_t)q[base + 1] << 8);
+    for (int b = 0; b < (index+headSize); ++b) {
+        int blockOffset = b * typeSize;
+        uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
         h_stage[pos++] = halfToFloat(bits);
     }
     ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    free(h_stage);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    /*
     int threads = 256;
     int threadBlocks = (headSize + threads - 1) / threads;
     sdotKernel << <threadBlocks, threads >> > (dQ, dK, headSize, dPartial);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut); cudaFreeHost(h_stage);
+    */
+    float result = -123435.0f;
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSliceF16 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
 fail:
     if (dQ) cudaFree(dQ);
     if (dK) cudaFree(dK);
-    if (dPartial) cudaFree(dPartial);
-    if (dOut) cudaFree(dOut);
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
-float sdotSliceBF16(const uint8_t* q, const float* k, int headSize, int blocks, int typeSize) {
-    float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
+float sdotSliceBF16(uint64_t handle, const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
+    float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
-    float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
     // from q to dQ device
     float* h_stage = NULL;
     ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
     size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)q[base] | ((uint16_t)q[base + 1] << 8);
+    for (int b = 0; b < (index + headSize); ++b) {
+        int blockOffset = b * typeSize;
+        uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
         h_stage[pos++] = halfToFloat(bits);
     }
     ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    free(h_stage);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    /*
     int threads = 256;
     int threadBlocks = (headSize + threads - 1) / threads;
     sdotKernel << <threadBlocks, threads >> > (dQ, dK, headSize, dPartial);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut); cudaFreeHost(h_stage);
+    */
+    float result = -123435.0f;
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSliceBF16 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
 fail:
     if (dQ) cudaFree(dQ);
     if (dK) cudaFree(dK);
-    if (dPartial) cudaFree(dPartial);
-    if (dOut) cudaFree(dOut);
     if (h_stage)cudaFreeHost(h_stage);
-    return NAN;;
+    return NAN;
 }
 uint64_t cublasHandle() {
     cublasStatus_t status;
