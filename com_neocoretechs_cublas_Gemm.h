@@ -224,6 +224,14 @@ EXPORT uint64_t cublasHandle();
 EXPORT void cublasHandleDestroy(uint64_t);
 
 EXPORT int cudaGetMemInfo(size_t*, size_t*);
+
+EXPORT void launch_rmsnorm_fp32_rowmajor(const float*, const float*, float*, int, float);
+
+EXPORT void launch_av_weighted_sum_fp32_rowmajor(const float*, const float*, float*, int, int, int, int, int, int, size_t);
+
+EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const float*, float*, int, int, int, int, int, int, float, size_t);
+
+EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 #ifdef __cplusplus
 }
 #endif

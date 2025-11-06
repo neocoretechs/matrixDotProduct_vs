@@ -13,6 +13,8 @@
 // ---------- Error helpers ----------
 #define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
+#define NCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
+  fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); } } while(0)
 #define CHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); return -2; } } while(0)
 #define PCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
@@ -1039,6 +1041,142 @@ void cublasHandleDestroy(uint64_t handle) {
 int cudaGetMemInfo(size_t* free, size_t* total) {
     CHECK_CUDA(cudaMemGetInfo(free, total));
     return 0;
+}
+
+extern "C" __global__
+void rmsnorm_fp32_rowmajor(const float* __restrict__ x,
+    const float* __restrict__ weight,
+    float* __restrict__ out,
+    int size, float eps) {
+    // Block-wide reduction over x^2
+    float acc = 0.f;
+    for (int i = threadIdx.x; i < size; i += blockDim.x) {
+        float v = x[i];
+        acc += v * v;
+    }
+    // Warp reduce
+    for (int d = 16; d > 0; d >>= 1) acc += __shfl_down_sync(0xffffffff, acc, d);
+
+    // Shared reduction across warps
+    __shared__ float warpSum[32]; // supports up to 1024 threads
+    int lane = threadIdx.x & 31;
+    int wid = threadIdx.x >> 5;
+    if (lane == 0) warpSum[wid] = acc;
+    __syncthreads();
+
+    float sumsq = 0.f;
+    if (threadIdx.x < (blockDim.x >> 5)) sumsq = warpSum[threadIdx.x];
+    __syncthreads();
+
+    // Final fold by thread 0
+    if (threadIdx.x == 0) {
+        for (int w = 1; w < (blockDim.x >> 5); ++w) sumsq += warpSum[w];
+        float inv = rsqrtf(sumsq / size + eps);
+        // Write inv to shared for broadcast
+        warpSum[0] = inv;
+    }
+    __syncthreads();
+    float inv = warpSum[0];
+
+    // Normalize and scale
+    for (int i = threadIdx.x; i < size; i += blockDim.x) {
+        out[i] = weight[i] * (inv * x[i]);
+    }
+}
+extern "C" __global__
+void qk_scores_fp32_rowmajor(
+    const float* __restrict__ Q,       // [nHeads * headSize] for this token
+    const float* __restrict__ Kcache,  // global K cache, row-major
+    float* __restrict__ S,             // [nHeads * contextLength] scores for this token
+    int nHeads,
+    int headSize,
+    int contextLength,        // stride between rows (attOffset logic)
+    int kvDim,                // stride per timestep in K/V cache
+    int kvMul,                // head group divisor
+    int tMaxInclusive,        // position + token
+    float invSqrtHeadSize,
+    size_t layerBaseOffset    // base offset for curLayer in Kcache
+) {
+    int h = blockIdx.x;                   // head index
+    int t = blockIdx.y * blockDim.y + threadIdx.y; // timestep index
+    if (h >= nHeads || t > tMaxInclusive) return;
+
+    const float* q_h = Q + h * headSize;
+    const float* k_th = Kcache + layerBaseOffset + t * kvDim + (h / kvMul) * headSize;
+    float* s_row = S + h * contextLength;
+
+    // Parallel dot reduction over headSize
+    float acc = 0.f;
+    for (int i = threadIdx.x; i < headSize; i += blockDim.x) {
+        acc += q_h[i] * k_th[i];
+    }
+    // Warp reduce
+    for (int delta = 16; delta > 0; delta >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, delta);
+    }
+    // Shared reduce (one partial per warp)
+    __shared__ float warpSum[32]; // up to 32 warps per block
+    int warpId = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    if (lane == 0) warpSum[warpId] = acc;
+    __syncthreads();
+
+    if (threadIdx.x < (blockDim.x >> 5)) {
+        float dot = warpSum[threadIdx.x];
+        // fold remaining warps
+        for (int w = threadIdx.x + 1; w < (blockDim.x >> 5); ++w) dot += warpSum[w];
+        if (threadIdx.x == 0) s_row[t] = dot * invSqrtHeadSize;
+    }
+}
+extern "C" __global__
+void av_weighted_sum_fp32_rowmajor(
+    const float* __restrict__ A,       // [nHeads * contextLength] attention weights
+    const float* __restrict__ Vcache,  // global V cache, row-major
+    float* __restrict__ Xb,            // [nHeads * headSize] output for this token
+    int nHeads,
+    int headSize,
+    int contextLength,
+    int kvDim,
+    int kvMul,
+    int tMaxInclusive,
+    size_t layerBaseOffset
+) {
+    int h = blockIdx.x;                          // head
+    int i = blockIdx.y * blockDim.x + threadIdx.x; // element in head vector
+    if (h >= nHeads || i >= headSize) return;
+
+    const float* a_h = A + h * contextLength;
+    float* xb_h = Xb + h * headSize;
+
+    float acc = 0.f;
+#pragma unroll 4
+    for (int t = 0; t <= tMaxInclusive; ++t) {
+        const float* v_th = Vcache + layerBaseOffset + t * kvDim + (h / kvMul) * headSize;
+        acc += a_h[t] * v_th[i];
+    }
+    xb_h[i] = acc;
+}
+extern "C" void launch_rmsnorm_fp32_rowmajor(const float* x, const float* weight, float* out, int size, float eps) {
+    // One block is enough for vector sizes up to a few thousand; tune if needed
+    int threads = 256;
+    rmsnorm_fp32_rowmajor << <1, threads >> > (x, weight, out, size, eps);
+    NCHECK_CUDA(cudaGetLastError());
+    cudaDeviceSynchronize();
+}
+extern "C" void launch_av_weighted_sum_fp32_rowmajor(const float* Q, const float* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, size_t layerBaseOffset) {
+    int threads = 256;
+    av_weighted_sum_fp32_rowmajor << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, layerBaseOffset);
+    cudaDeviceSynchronize();
+}
+extern "C" void launch_qk_scores_fp32_rowmajor(const float* Q, const float* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, float invSqrtHeadSize, size_t layerBaseOffset) {
+    int threads = 256;
+    qk_scores_fp32_rowmajor << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, invSqrtHeadSize, layerBaseOffset);
+    cudaDeviceSynchronize();
+}
+extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
+    int threads = 256;
+    row_softmax_fp32 << <1, threads >> > (S, A, rows, cols, ldS, ldA);
+    cudaDeviceSynchronize();
 }
 #ifdef __cplusplus
 }
