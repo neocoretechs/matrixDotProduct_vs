@@ -50,64 +50,93 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
-/*
-__global__ void convertQ8ToFloat(uint8_t* input, float* output, int blockSize, int typeSize, int headerBytes) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+#include <cuda_fp16.h>
+
+// Q8 block: header has FP16 scale at offset 0, optional zp at offset 2
+__device__ inline float loadQ8(const uint8_t* base,int blockSize,int typeSize, int headerBytes,int index) {
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
-    //if (index < 8) {
-        printf("idx=%d b=%d i=%d base=%d off=%d  typeSize=%d hdr=%d\n",
-            index, blockIndex, withinBlock, blockOffset, blockOffset + headerBytes + withinBlock, typeSize, headerBytes);
-   //}
-    // Decode scale from header (assume FP16 at offset 0)
-    uint16_t scaleBits = (uint16_t)input[blockOffset] |
-        ((uint16_t)input[blockOffset + 1] << 8);
-    __half hscale = *reinterpret_cast<__half*>(&scaleBits);
+    // scale from header
+    const uint8_t* hdr = base + blockOffset;
+    uint16_t scaleBits = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
+    __half hscale = __ushort_as_half(scaleBits);   // reinterpret raw bits
     float scale = __half2float(hscale);
-    // Load quantized value (signed 8‑bit here)
-    int8_t q = *(int8_t*)&input[blockOffset + headerBytes + withinBlock];
-    output[index] = (float)q * scale;
+    // quantized value
+    const uint8_t* payload = base + blockOffset + headerBytes;
+    int8_t q = reinterpret_cast<const int8_t*>(payload)[withinBlock];
+    return (float)(q) * scale;
 }
 
-__global__ void convertQ4ToFloat(uint8_t* input, float* output, int blockSize, int typeSize, int headerBytes) {
-    int index = blockIdx.x * blockDim.x + threadIdx.x;
+// Q4 block: header has FP16 scale at offset 0
+__device__ inline float loadQ4(const uint8_t* base,int blockSize,int typeSize,int headerBytes,int index) {
     int blockIndex = index / blockSize;
+    int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
-    // Decode scale from header (assume FP16 at offset 0)
-    uint16_t scaleBits = (uint16_t)input[blockOffset] |
-        ((uint16_t)input[blockOffset + 1] << 8);
-    __half hscale = *reinterpret_cast<__half*>(&scaleBits);
+    // scale from header
+    const uint8_t* hdr = base + blockOffset;
+    uint16_t scaleBits = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
+    __half hscale = __ushort_as_half(scaleBits);   // reinterpret raw bits
     float scale = __half2float(hscale);
-    int modIndex = index % blockSize;
-    int8_t q;
-    if (modIndex < blockSize / 2)
-        // Load quantized value (signed 8‑bit here)
-        q = *(int8_t*)&input[blockOffset + headerBytes + modIndex] & 0x0F;
-    else
-        q = (int8_t)((*(int8_t*)&input[blockOffset + headerBytes + modIndex - blockSize/2] >> 4) & 0x0F);
-    output[index] = (float)q * scale;
-}
-// FP16 (IEEE half) → float
-__global__ void convertF16ToFloat(const uint8_t* __restrict__ input, float* __restrict__ output, int numElems, int elemStrideBytes) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numElems) return;
-    const uint8_t* src = input + idx * elemStrideBytes;
-    uint16_t hbits = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
-    __half h = *reinterpret_cast<const __half*>(&hbits);
-    output[idx] = __half2float(h);
+    // payload
+    const uint8_t* payload = base + blockOffset + headerBytes;
+    int byteIdx = withinBlock >> 1;
+    uint8_t byteVal = payload[byteIdx];
+    uint8_t nibble = (withinBlock & 1) ? (byteVal >> 4) & 0x0F : byteVal & 0x0F;
+    int signed4 = (int)nibble - 8; // map 0..15 → -8..7
+    return (float)signed4 * scale;
 }
 
-// BF16 → float (high 16 bits of f32)
-__global__ void convertBF16ToFloat(const uint8_t* __restrict__ input, float* __restrict__ output, int numElems, int elemStrideBytes) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= numElems) return;
-    const uint8_t* src = input + idx * elemStrideBytes;
-    uint16_t bf16 = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
-    uint32_t bits = ((uint32_t)bf16) << 16;
-    output[idx] = static_cast<float>(bits);
+// FP16 element at stride
+__device__ inline float loadF16(const uint8_t* base, int idx, int strideBytes) {
+    const uint8_t* src = base + idx * strideBytes;
+    uint16_t hbits = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+    __half h = __ushort_as_half(hbits);   // reinterpret raw bits
+    return __half2float(h);
 }
-*/
+
+// BF16 element at stride
+__device__ inline float loadBF16(const uint8_t* base, int idx, int strideBytes) {
+    const uint8_t* src = base + idx * strideBytes;
+    uint16_t bf16 = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+    uint32_t fbits = ((uint32_t)bf16) << 16;
+    float f;
+    memcpy(&f, &fbits, sizeof(float));
+    return f;
+}
+#include <cuda_runtime.h>
+
+__global__ void dotProduct(float* A, float* B, float* result, int N) {
+    // Shared memory for accumulating partial results
+    __shared__ float temp[256];
+    int threadId = threadIdx.x + blockIdx.x * blockDim.x;
+    float sum = 0.0f;
+
+    // Compute the dot product for each thread
+    for (int i = threadId; i < N; i += gridDim.x * blockDim.x) {
+        sum += A[i] * B[i];
+    }
+
+    // Store the result in shared memory
+    temp[threadIdx.x] = sum;
+
+    // Synchronize threads
+    __syncthreads();
+
+    // Reduce the partial results to a single value
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            temp[threadIdx.x] += temp[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    // Write the block result to the global result array
+    if (threadIdx.x == 0) {
+        atomicAdd(result, temp[0]);
+    }
+}
+
 static inline float halfToFloat(uint16_t h) {
     uint16_t h_exp = (h & 0x7C00u);
     uint16_t h_sig = (h & 0x03FFu);
@@ -146,54 +175,53 @@ std::vector<float> convertQ8ToFloat(const uint8_t* input, size_t len, int blockS
     size_t blocks = len / typeSize;
     std::vector<float> out(blocks * blockSize);
     size_t pos = 0;
-    for (size_t b = 0; b < blocks; ++b) {
-        size_t base = b * typeSize;
-        uint16_t scaleBits = (uint16_t)input[base]
-            | ((uint16_t)input[base + 1] << 8);
-        float scale = halfToFloat(scaleBits);
-
-        for (int i = 0; i < blockSize; ++i) {
-            int8_t q = *(int8_t*)&input[base + headerBytes + i];
-            out[pos++] = (float)q * scale;
-        }
+    for (int b = 0; b < blocks; b++) {
+        int blockIndex = b / blockSize;
+        int withinBlockIndex = b % blockSize;
+        int blockOffset = blockIndex * typeSize;
+        int8_t quant = *(int8_t*)&input[blockOffset + headerBytes + withinBlockIndex];
+        uint16_t bits = (uint16_t)input[blockOffset] | ((uint16_t)input[blockOffset + 1] << 8);
+        float scale = halfToFloat(bits);
+        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
+        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
+        out.push_back((float)quant * scale);
     }
     return out;
 }
 // Convert and push Q8 buffer directly to device, return pointer to device buffer
-float* toDeviceFloatQ8(const uint8_t* h_src, size_t len, int blockSize, int typeSize, int headerBytes) {
-    int blocks = int(len / typeSize);
-    size_t totalElems = size_t(blocks) * size_t(blockSize);
-    size_t outBytes = totalElems * sizeof(float);
-    // Try device alloc
-    float* d_out = nullptr;
-    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
-    // CPU decode into pinned host staging
-    float* h_stage = nullptr;
-    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
-    if (ce != cudaSuccess) {
-        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
-        h_stage = (float*)malloc(outBytes); // fallback
-        if (!h_stage) {
-            std::cerr << "Fallback malloc failed\n";
-            cudaFree(d_out);
-            exit(1);
-        }
-    }
+float* toDeviceFloatQ8(const uint8_t* q, size_t headSize, int index, int blockSize, int typeSize, int headerBytes) {
+    float* dQ = NULL;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
+
+    //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
+    float* h_stage = NULL;
+    ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
+    //int blockIndex = index / GGMLType.Q8_0.getBlockSize();
+    //int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
+    //int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
+    //byte quant = readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
+    //float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
+    //return quant * scale;
     size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
-        // half->float (use a robust helper)
+    for (int b = index; b < (index + headSize); b++) {
+        int blockIndex = b / blockSize;
+        int withinBlockIndex = b % blockSize;
+        int blockOffset = blockIndex * typeSize;
+        int8_t quant = *(int8_t*)&q[blockOffset + headerBytes + withinBlockIndex];
+        uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
         float scale = halfToFloat(bits);
-        for (int i = 0; i < blockSize; ++i) {
-            int8_t q = (int8_t)h_src[base + headerBytes + i];
-            h_stage[pos++] = (float)q * scale;
-        }
+        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
+        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
+        h_stage[pos++] = (float)quant * scale;
     }
-    // Upload once
-    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
-    PCHECK_CUDA(cudaFreeHost(h_stage));
-    return d_out;
+    ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    GOCHECK_CUDA(cudaFree(dQ)); GOCHECK_CUDA(cudaFreeHost(h_stage));
+    return dQ;
+fail:
+    if (dQ) cudaFree(dQ);
+    return NULL;
 }
 // Convert and push Q4 buffer directly to device, return pointer to device buffer
 float* toDeviceFloatQ4(const uint8_t * h_src, size_t len, int blockSize, int typeSize, int headerBytes) {
@@ -665,7 +693,7 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
                 return -1;
             }
            // convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
-           return (jlong)(uintptr_t)toDeviceFloatQ8(buffer, outBytes, blockSize, typeSize, headerBytes);
+           return (jlong)(uintptr_t)toDeviceFloatQ8(buffer, outBytes, 0, blockSize, typeSize, headerBytes);
            //dout = convertQ8ToFloat(buffer, blockSize, typeSize, headerBytes);
            //break;
         case 2: // F16
@@ -706,33 +734,8 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
     cudaMemcpy(d_tensor, dout.data(), bytes, cudaMemcpyHostToDevice);
     return (jlong)(uintptr_t)d_tensor;
 }
-__global__ void sdotKernel(const float* __restrict__ qBase, const float* __restrict__ kBase, int headSize, float* __restrict__ partial) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    float v = 0.0f;
-    if (idx < headSize) {
-        float q = qBase[idx];
-        float k = kBase[idx];
-        v = q * k;
-    }
-    partial[idx] = v;
- }
-   
-__global__ void reduceKernel(const float* __restrict__ in, int n, float* out) {
-    extern __shared__ float s[];
-    int tid = threadIdx.x;
-    int idx = blockIdx.x * blockDim.x + tid;
-    float x = (idx < n) ? in[idx] : 0.0f;
-    s[tid] = x;
-    __syncthreads();
-    // tree reduction in shared memory
-    for (int stride = blockDim.x >> 1; stride > 0; stride >>= 1) {
-        if (tid < stride) s[tid] += s[tid + stride];
-        __syncthreads();
-    }
-    if (tid == 0) atomicAdd(out, s[0]);
-}
 
-JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env, jclass clazz, jobject qBuf, jint qOffsetFloats, jobject kBuf, jint kOffsetFloats, jint headSize) {
+JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env, jclass clazz, jlong handle, jobject qBuf, jint qOffsetFloats, jobject kBuf, jint kOffsetFloats, jint headSize) {
     // Get base host pointers from direct ByteBuffers
     void* qHostBase = env->GetDirectBufferAddress(qBuf);
     void* kHostBase = env->GetDirectBufferAddress(kBuf);
@@ -742,68 +745,38 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env
     }
     const float* qHost = reinterpret_cast<const float*>(qHostBase) + qOffsetFloats;
     const float* kHost = reinterpret_cast<const float*>(kHostBase) + kOffsetFloats;
-    // Device buffers
-    float* dQ = nullptr, * dK = nullptr, * dPartial = nullptr, * dOut = nullptr;
-    size_t bytes = static_cast<size_t>(headSize) * sizeof(float);
-    cudaError_t ce;
-    ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dPartial, bytes); GOCHECK_CUDA(ce);
-    ce = cudaMalloc((void**)&dOut, sizeof(float)); GOCHECK_CUDA(ce);
-    // Initialize output accumulator to 0
-    float zero = 0.0f;
-    ce = cudaMemcpy(dOut, &zero, sizeof(float), cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    // Copy only the slice needed
-    ce = cudaMemcpy(dQ, qHost, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    ce = cudaMemcpy(dK, kHost, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    // Launch dot per element, then reduce
-    int threads = 256;
-    int blocks = (headSize + threads - 1) / threads;
-    sdotKernel << <blocks, threads >> > (dQ, dK, headSize, dPartial);
-    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    // Shared mem sized to threads
-    reduceKernel << <blocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
-    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    // Final scalar result
-    float result = NAN;
-    ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    // Cleanup
-    cudaFree(dQ); cudaFree(dK); cudaFree(dPartial); cudaFree(dOut);
-    return result;
-    fail:
-        if (dQ) cudaFree(dQ);
-        if (dK) cudaFree(dK);
-        if (dPartial) cudaFree(dPartial);
-        if (dOut) cudaFree(dOut);
-       return NAN;
+    return sdotSlice((uint64_t)handle, qHost, kHost, headSize);
  } 
 #ifdef __cplusplus
 extern "C" {
 #endif
+cudaError_t launchDotProductKernel(float* d_A, float* d_B, float* result, int N) {
+        float* d_result;
+        cudaError_t ce = cudaMemset(d_result, 0, sizeof(float));
+        if (ce) return ce;
+        // Launch kernel with an appropriate grid and block size
+        int blockSize = 256;
+        int numBlocks = (N + blockSize - 1) / blockSize;
+        dotProduct << <numBlocks, blockSize >> > (d_A, d_B, d_result, N);
+        ce = cudaGetLastError();
+        if (ce) return ce;
+        return cudaMemcpy(result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+}
 EXPORT float sdotSlice(uint64_t handle, const float* q, const float* k, int headSize) {
-    float* dQ = NULL, * dK = NULL, * dPartial = NULL, * dOut = NULL;
+    float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    float zero = 0.0f;
+ 
     ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    /*
-    int threads = 256;
-    int blocks = (headSize + threads - 1) / threads;
-    sdotKernel << <blocks, threads >> > (dQ, dK, headSize, dPartial);
-    ce = cudaGetLastError(); if (ce) goto fail;
-    reduceKernel << <blocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
-    */
+    
     float result = -12345.0f;
     cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSlice size=%d q[0]=%f k[0]=%f\n", headSize, q[0], k[0]);
-    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
-    ce = cudaGetLastError(); if (ce) goto fail;
-    //GOCHECK_CUDA(cudaDeviceSynchronize());
-    //float result = NAN;
-    //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
     cudaFree(dQ); cudaFree(dK);
     return result;
 fail:
@@ -817,7 +790,7 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
-    float zero = 0.0f;
+
     //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
     float* h_stage = NULL;
     ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
@@ -841,22 +814,13 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
     }
     ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    /*
-    int threads = 256;
-    int threadBlocks = (headSize + threads - 1) / threads;
-    sdotKernel << <threadBlocks, threads >> > (dQ, dK, headSize, dPartial);
-    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    reduceKernel << <threadBlocks, threads, threads * sizeof(float) >> > (dPartial, headSize, dOut);
-    */
+
     float result = -123435.0f;
     cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSliceQ8 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
-    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
-    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
-    //GOCHECK_CUDA(cudaDeviceSynchronize());
-    //float result = NAN;
-    //ce = cudaMemcpy(&result, dOut, sizeof(float), cudaMemcpyDeviceToHost); GOCHECK_CUDA(ce);
-    cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
+    cudaFree(dQ); cudaFree(dK);  cudaFreeHost(h_stage);
     return result;
     fail:
         if (dQ) cudaFree(dQ);
@@ -1178,6 +1142,7 @@ extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int 
     row_softmax_fp32 << <1, threads >> > (S, A, rows, cols, ldS, ldA);
     cudaDeviceSynchronize();
 }
+
 #ifdef __cplusplus
 }
 #endif

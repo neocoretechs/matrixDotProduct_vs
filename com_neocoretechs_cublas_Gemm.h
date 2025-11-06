@@ -207,7 +207,7 @@ JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdotDevice(JNIEnv*, jcl
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv*, jclass, jobject, jint, jint, jint, jint);
 
-JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
+JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jlong, jobject, jint, jobject, jint, jint);
 
 EXPORT float sdotSlice(uint64_t, const float*, const float*, int);
 
