@@ -160,40 +160,6 @@ JNIEXPORT jlongArray JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMemGetInfo(JN
 * Scalar dot product of 2 of float32 cublasSdot
 */
 JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Gemm_sdot(JNIEnv*, jclass, jlong, jint, jfloatArray, jint, jfloatArray, jint, jfloatArray);
-/*
-* Upload slice for batch attention
-*/
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_uploadSlice(JNIEnv*, jclass, jlong, jfloatArray, jlong, jlong, jint);
-/*
-* Download slice
-*/
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_downloadSlice(JNIEnv*, jclass, jlong, jfloatArray, jlong, jlong, jint);
-/*
-* Allocate device memory for batch attention
-*/
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_init(JNIEnv*, jclass, jlong, jint, jint, jint, jint, jint );
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDQ(JNIEnv*, jclass, jlong);
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDK(JNIEnv*, jclass, jlong);
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDV(JNIEnv*, jclass, jlong);
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDS(JNIEnv*, jclass, jlong);
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_getDO(JNIEnv*, jclass, jlong);
-
-JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_destroy(JNIEnv*, jclass, jlong);
-
-JNIEXPORT jfloatArray JNICALL Java_com_neocoretechs_cublas_Attn_softMax(JNIEnv*, jclass, jfloatArray, jint, jint);
-
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv*, jclass, jlong,
-	jobject, jint, jobject, jint, jobject, jint, jobject, jint, 
-	jobject, jobject, jobject);
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_initContext(JNIEnv*, jclass , jlong, jint, jint, jint, jint);
-
-JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_freeContext(JNIEnv*, jclass, jlong);
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_cudaMallocBytes(JNIEnv*, jclass, jlong);
 

@@ -100,7 +100,7 @@ __device__ inline float loadBF16(const uint8_t* base, int idx, int strideBytes) 
     return f;
 }
 
-__global__ void dotProduct(float* A, float* B, float* result, int N) {
+/*__global__ void dotProduct(float* A, float* B, float* result, int N) {
     // Shared memory for accumulating partial results
     __shared__ float temp[256];
     int threadId = threadIdx.x + blockIdx.x * blockDim.x;
@@ -128,7 +128,27 @@ __global__ void dotProduct(float* A, float* B, float* result, int N) {
     // Write the block result to the global result array
     if (threadIdx.x == 0) {
         atomicAdd(result, temp[0]);
-    }
+    }*/
+extern "C" __global__ void dotProduct(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ result, int N) {
+        // Use dynamic shared memory sized to blockDim.x
+        extern __shared__ float smem[];
+        int tid = threadIdx.x;
+        int gid = blockIdx.x * blockDim.x + tid;
+        int stride = blockDim.x * gridDim.x;
+
+        float sum = 0.f;
+        for (int i = gid; i < N; i += stride) {
+            sum += A[i] * B[i];
+        }
+        smem[tid] = sum;
+        __syncthreads();
+        // Reduce within block
+        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+            if (tid < s) smem[tid] += smem[tid + s];
+            __syncthreads();
+        }
+        // One atomicAdd per block
+        if (tid == 0) atomicAdd(result, smem[0]);
 }
 
 static inline float halfToFloat(uint16_t h) {
@@ -369,91 +389,6 @@ static void cpu_attention_fp32(const float* hQ, const float* hK, const float* hV
     }
 }
 
-// ---------- Main test function ----------
-extern "C"
-int attention_test_fp32(cublasHandle_t handle, cudaStream_t stream,
-    int Tq, int Tk, int d, const float* d_Q, int ldQ, const float* d_K, int ldK, const float* d_V, int ldV,
-    float* d_O, int ldO, float* d_S, int ldS, float* d_A, int ldA,
-    int do_cpu_check, float* out_ms_qkt, float* out_ms_softmax, float* out_ms_av) {
-
-    if (Tq <= 0 || Tk <= 0 || d <= 0) { fprintf(stderr, "Invalid sizes\n"); return -10; }
-    if (ldQ != d || ldK != d || ldV != d || ldO != d || ldS != Tk || ldA != Tk) {
-        fprintf(stderr, "Leading dims mismatch (expect row-major)\n"); return -11;
-    }
-
-    cudaEvent_t e0, e1, e2, e3, e4;
-    CHECK_CUDA(cudaEventCreate(&e0));
-    CHECK_CUDA(cudaEventCreate(&e1));
-    CHECK_CUDA(cudaEventCreate(&e2));
-    CHECK_CUDA(cudaEventCreate(&e3));
-    CHECK_CUDA(cudaEventCreate(&e4));
-
-    // QK^T scaled → S
-    float alpha_scores = 1.0f / std::sqrt((float)d);
-    float beta0 = 0.0f;
-
-    CHECK_CUDA(cudaEventRecord(e0, stream));
-    CHECK_CUBLAS(cublasSgemm(
-        handle, CUBLAS_OP_N, CUBLAS_OP_T,
-        Tq, Tk, d,
-        &alpha_scores,
-        d_Q, ldQ,
-        d_K, ldK,
-        &beta0,
-        d_S, ldS
-    ));
-    CHECK_CUDA(cudaEventRecord(e1, stream));
-
-    // Softmax rows
-    int rc = softmax_rows_fp32(d_S, d_A, Tq, Tk, ldS, ldA, stream);
-    if (rc) { fprintf(stderr, "Softmax kernel failed\n"); return rc; }
-    CHECK_CUDA(cudaEventRecord(e2, stream));
-
-    // AV → O (no extra scale)
-    float alpha_av = 1.0f, beta_av = 0.0f;
-    CHECK_CUBLAS(cublasSgemm(
-        handle, CUBLAS_OP_N, CUBLAS_OP_N,
-        Tq, d, Tk,
-        &alpha_av,
-        d_A, ldA,
-        d_V, ldV,
-        &beta_av,
-        d_O, ldO
-    ));
-    CHECK_CUDA(cudaEventRecord(e3, stream));
-
-    CHECK_CUDA(cudaEventRecord(e4, stream));
-    CHECK_CUDA(cudaEventSynchronize(e4));
-
-    float ms_qkt = 0, ms_sm = 0, ms_av = 0;
-    CHECK_CUDA(cudaEventElapsedTime(&ms_qkt, e0, e1));
-    CHECK_CUDA(cudaEventElapsedTime(&ms_sm, e1, e2));
-    CHECK_CUDA(cudaEventElapsedTime(&ms_av, e2, e3));
-
-    if (out_ms_qkt)     *out_ms_qkt = ms_qkt;
-    if (out_ms_softmax) *out_ms_softmax = ms_sm;
-    if (out_ms_av)      *out_ms_av = ms_av;
-
-    if (do_cpu_check && Tq <= 2 && Tk <= 256 && d <= 128) {
-        std::vector<float> hQ(Tq * d), hK(Tk * d), hV(Tk * d), hO(Tq * d), hO_cpu(Tq * d);
-        CHECK_CUDA(cudaMemcpy(hQ.data(), d_Q, sizeof(float) * Tq * d, cudaMemcpyDeviceToHost));
-        CHECK_CUDA(cudaMemcpy(hK.data(), d_K, sizeof(float) * Tk * d, cudaMemcpyDeviceToHost));
-        CHECK_CUDA(cudaMemcpy(hV.data(), d_V, sizeof(float) * Tk * d, cudaMemcpyDeviceToHost));
-        CHECK_CUDA(cudaMemcpy(hO.data(), d_O, sizeof(float) * Tq * d, cudaMemcpyDeviceToHost));
-        cpu_attention_fp32(hQ.data(), hK.data(), hV.data(), hO_cpu.data(), Tq, Tk, d);
-        int mismatches = 0;
-        for (int i = 0; i < std::min(16, Tq * d); ++i) {
-            float a = hO[i], b = hO_cpu[i];
-            float diff = std::abs(a - b);
-            float rel = diff / std::max(1e-6f, std::abs(b));
-            if (rel > 1e-3f) ++mismatches;
-        }
-        if (mismatches) fprintf(stderr, "CPU vs GPU mismatch count=%d (rel tol 1e-3)\n", mismatches);
-    }
-    cudaEventDestroy(e0); cudaEventDestroy(e1);
-    cudaEventDestroy(e2); cudaEventDestroy(e3); cudaEventDestroy(e4);
-    return 0;
-}
 extern "C" int attention_batched_heads(
     cublasHandle_t handle, cudaStream_t stream,
     int Tq, int Tk, int d, int H,
@@ -517,230 +452,7 @@ extern "C" int attention_batched_heads(
     if (out_ms_av)  *out_ms_av = ms_av_total;
     return 0;
 }
-JNIEXPORT jfloatArray JNICALL Java_com_neocoretechs_cublas_Attn_softMax
-(JNIEnv* env, jclass clazz, jfloatArray jInput, jint rows, jint cols) {
 
-    jsize len = env->GetArrayLength(jInput);
-    std::vector<float> hInput(len);
-    env->GetFloatArrayRegion(jInput, 0, len, hInput.data());
-
-    std::vector<float> hOutput(len);
-
-    float* dS, * dA;
-    size_t bytes = len * sizeof(float);
-    cudaMalloc(&dS, bytes);
-    cudaMalloc(&dA, bytes);
-    cudaMemcpy(dS, hInput.data(), bytes, cudaMemcpyHostToDevice);
-
-    int threads = 128;
-    int blocks = (rows + threads - 1) / threads;
-    row_softmax_fp32 << <blocks, threads >> > (dS, dA, rows, cols, cols, cols);
-    cudaDeviceSynchronize();
-
-    cudaMemcpy(hOutput.data(), dA, bytes, cudaMemcpyDeviceToHost);
-
-    cudaFree(dS);
-    cudaFree(dA);
-
-    jfloatArray jOut = env->NewFloatArray(len);
-    env->SetFloatArrayRegion(jOut, 0, len, hOutput.data());
-    return jOut;
-}
-
-struct Ctx {
-    cublasHandle_t handle;
-    cudaStream_t stream;
-    int Tq, Tk, d, H;
-    // optional: persistent device buffers
-    float* dQ, * dK, * dV, * dO, * dS, * dA;
-};
-
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_initContext(
-    JNIEnv* env, jclass clazz, jlong handle, jint Tq, jint Tk, jint d, jint H) {
-    // Best-effort: enable TF32 tensor ops mode (ignored on non-Ampere/Hopper)
-    CHECK_CUBLAS(cublasSetMathMode((cublasHandle_t)handle, CUBLAS_TF32_TENSOR_OP_MATH));
-    cudaStream_t stream;
-    CHECK_CUDA(cudaStreamCreate(&stream));
-    CHECK_CUBLAS(cublasSetStream((cublasHandle_t)handle, stream));
-    auto* ctx = new Ctx{ (cublasHandle_t)handle, stream, Tq, Tk, d, H };
-    // Allocate persistent device buffers once
-    size_t bQ = size_t(Tq) * d * sizeof(float);
-    size_t bK = size_t(Tk) * d * sizeof(float);
-    size_t bV = size_t(Tk) * d * sizeof(float);
-    size_t bO = size_t(Tq) * d * sizeof(float);
-    size_t bS = size_t(Tq) * Tk * sizeof(float);
-    size_t bA = size_t(Tq) * Tk * sizeof(float);
-    cudaMalloc(&ctx->dQ, bQ);
-    cudaMalloc(&ctx->dK, bK);
-    cudaMalloc(&ctx->dV, bV);
-    cudaMalloc(&ctx->dO, bO);
-    cudaMalloc(&ctx->dS, bS);
-    cudaMalloc(&ctx->dA, bA);
-    return reinterpret_cast<jlong>(ctx);
-}
-
-JNIEXPORT void JNICALL Java_com_neocoretechs_cublas_Attn_freeContext(JNIEnv* env, jclass clazz, jlong h) {
-    auto* ctx = reinterpret_cast<Ctx*>(h);
-    if (!ctx) return;
-    cudaFree(ctx->dQ); cudaFree(ctx->dK); cudaFree(ctx->dV);
-    cudaFree(ctx->dO); cudaFree(ctx->dS); cudaFree(ctx->dA);
-    cudaStreamDestroy(ctx->stream);
-    delete ctx;
-}
-
-static float* addr(JNIEnv* env, jobject buf) {
-    return static_cast<float*>(env->GetDirectBufferAddress(buf));
-}
-
-JNIEXPORT jint JNICALL Java_com_neocoretechs_cublas_Attn_attentionFp32(JNIEnv * env, jclass clazz, jlong h,
-    jobject jQ, jint ldQ, jobject jK, jint ldK, jobject jV, jint ldV,
-    jobject jO, jint ldO, 
-    jobject jMsQKT, jobject jMsSM, jobject jMsAV) {
-
-    auto* ctx = reinterpret_cast<Ctx*>(h);
-    float* hQ = addr(env, jQ);
-    float* hK = addr(env, jK);
-    float* hV = addr(env, jV);
-    float* hO = addr(env, jO);
-    //float* hS = addr(env, jS);
-    //float* hA = addr(env, jA);
-
-    float* msQKT = addr(env, jMsQKT);
-    float* msSM = addr(env, jMsSM);
-    float* msAV = addr(env, jMsAV);
-
-    size_t bQ = size_t(ctx->Tq) * ctx->d * sizeof(float);
-    size_t bK = size_t(ctx->Tk) * ctx->d * sizeof(float);
-    size_t bV = size_t(ctx->Tk) * ctx->d * sizeof(float);
-    size_t bO = size_t(ctx->Tq) * ctx->d * sizeof(float);
-    //size_t bS = size_t(ctx->Tq) * ctx->Tk * sizeof(float);
-    //size_t bA = size_t(ctx->Tq) * ctx->Tk * sizeof(float);
-
-    // Host→Device (persistent device buffers)
-    cudaMemcpy(ctx->dQ, hQ, bQ, cudaMemcpyHostToDevice);
-    cudaMemcpy(ctx->dK, hK, bK, cudaMemcpyHostToDevice);
-    cudaMemcpy(ctx->dV, hV, bV, cudaMemcpyHostToDevice);
-
-    int ret = attention_batched_heads(ctx->handle, ctx->stream, 
-        ctx->Tq, ctx->Tk, ctx->d, ctx->H,
-        ctx->dQ, ldQ, ctx->dK, ldK, ctx->dV, ldV,
-        ctx->dO, ldO, ctx->dS, ctx->Tk, ctx->dA, ctx->Tk,
-        msQKT, msSM, msAV);
-
-    // Device→Host
-    CHECK_CUDA(cudaMemcpy(hO, ctx->dO, bO, cudaMemcpyDeviceToHost));
-    //cudaMemcpy(hS, ctx->dS, bS, cudaMemcpyDeviceToHost);
-    //cudaMemcpy(hA, ctx->dA, bA, cudaMemcpyDeviceToHost);
-
-    return ret;
-}
-
-/*
-* Function to convert GGUF quantized types to float using CUDA
-* 0 - Q4_0
-* 1 - Q8_0
-* 2 - F16
-* 3 - B16
-*/
-JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(JNIEnv* env, jclass clazz, jobject byteBuffer, jint blockSize, jint typeSize, jint headerBytes, jint format) {
-    // Get direct buffer address
-    uint8_t* buffer = static_cast<uint8_t*>(env->GetDirectBufferAddress(byteBuffer));
-    if(buffer == NULL) {
-        // Handle error: buffer is not direct
-        fprintf(stderr, "convertBufferToFloat -> ByteBuffer is not direct!\n");
-        return -100;
-    }
-    size_t length = env->GetDirectBufferCapacity(byteBuffer);
-    if (length % typeSize != 0) {
-        fprintf(stderr, "length of buffer not a multiple of typeSize!\n");
-        return -101;
-    }
-    float* d_output; // Device pointer
-    // Allocate memory on the GPU
-    int blocks = (int)((size_t)length / (size_t)typeSize);
-    int totalElems = blocks * blockSize;
-    size_t outBytes = (size_t)totalElems * sizeof(float);
-    // Before launch (native side)
-    fprintf(stderr, "***Allocating buffer:%lld format %d, %d floats (bytes=%zu) blocks=%d blockSize=%d len=%lld\n",
-        buffer, format, totalElems, outBytes, blocks, blockSize, (long long)length);
-    if (headerBytes != 2) { fprintf(stderr, "Bad headerBytes\n"); return -1; }
- 
-    if ((size_t)length % (size_t)typeSize != 0) {
-        fprintf(stderr, "length %% typeSize != 0\n"); return -1;
-    }
-    CHECK_CUDA(cudaMalloc((void**)&d_output, outBytes));
-    //dim3 threads(256);
-    //dim3 grid((totalElems + threads.x - 1) / threads.x);
-    //convertQ4ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
-    std::vector<float> dout;
-    switch(format) {
-        case 0: // Q4_0
-            // Conversion logic for q4_0 to float on the GPU
-            if (typeSize != headerBytes + blockSize) {
-                fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
-                return -1;
-            }
-            return (jlong)(uintptr_t)toDeviceFloatQ4(buffer, outBytes, blockSize, typeSize, headerBytes);
-        case 1: // Q8_0
-            if (typeSize != headerBytes + blockSize) {
-                fprintf(stderr, "typeSize mismatch exp=%d got=%d\n", headerBytes + blockSize, typeSize);
-                return -1;
-            }
-           // convertQ8ToFloat << <grid, threads >> > (buffer, d_output, blockSize, typeSize, headerBytes);
-           return (jlong)(uintptr_t)toDeviceFloatQ8(buffer, outBytes, 0, blockSize, typeSize, headerBytes);
-           //dout = convertQ8ToFloat(buffer, blockSize, typeSize, headerBytes);
-           //break;
-        case 2: // F16
-            return (jlong)(uintptr_t)toDeviceFloatF16(buffer, outBytes, typeSize);
-        case 3: // BF16
-            return (jlong)(uintptr_t)toDeviceFloatBF16(buffer, outBytes, typeSize);
-        default:
-           // Handle F32
-           // length is in bytes, so number of floats is length / sizeof(float)
-           size_t numFloats = length / sizeof(float);
-           size_t bytes = numFloats * sizeof(float);
-           float* d_tensor = nullptr;
-           cudaError_t err = cudaMalloc((void**)&d_tensor, bytes);
-           if (err != cudaSuccess) {
-                fprintf(stderr, "cudaMalloc F32 failed: %s\n", cudaGetErrorString(err));
-                return 0;
-           }
-           // Copy raw floats from host ByteBuffer to device
-           err = cudaMemcpy(d_tensor, buffer, bytes, cudaMemcpyHostToDevice);
-           if (err != cudaSuccess) {
-                fprintf(stderr, "cudaMemcpy F32 failed: %s\n", cudaGetErrorString(err));
-                cudaFree(d_tensor);
-                return 0;
-           }
-           return (jlong)(uintptr_t)d_tensor;
-           break;
-    }
-    // Copy the results from device to host (assuming you need results back on CPU)
-    //float* h_output = (float*)malloc(numFloats * sizeof(float)); // Host pointer
-    //CHECK_CUDA(cudaMemcpy(h_output, d_output, numFloats * sizeof(float), cudaMemcpyDeviceToHost));
-    // Use h_output as needed...
-    // Clean up
-    //free(h_output);
-    //cudaFree(d_output); // Free device memory
-    float* d_tensor = nullptr;
-    size_t bytes = dout.size() * sizeof(float);
-    cudaMalloc((void**)&d_tensor, bytes);
-    cudaMemcpy(d_tensor, dout.data(), bytes, cudaMemcpyHostToDevice);
-    return (jlong)(uintptr_t)d_tensor;
-}
-
-JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env, jclass clazz, jlong handle, jobject qBuf, jint qOffsetFloats, jobject kBuf, jint kOffsetFloats, jint headSize) {
-    // Get base host pointers from direct ByteBuffers
-    void* qHostBase = env->GetDirectBufferAddress(qBuf);
-    void* kHostBase = env->GetDirectBufferAddress(kBuf);
-    if (!qHostBase || !kHostBase) {
-        // Not direct or null
-        return NAN;
-    }
-    const float* qHost = reinterpret_cast<const float*>(qHostBase) + qOffsetFloats;
-    const float* kHost = reinterpret_cast<const float*>(kHostBase) + kOffsetFloats;
-    return sdotSliceCuBLAS((uint64_t)handle, qHost, kHost, headSize);
- } 
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -749,14 +461,22 @@ cudaError_t launchDotProductKernel(float* d_A, float* d_B, float* result, int N)
         cudaError_t ce = cudaMalloc((void**)&d_result, sizeof(float));
         if (ce) return ce;
         ce = cudaMemset(d_result, 0, sizeof(float));
-        if (ce) return ce;
+        if (ce) {
+            cudaFree(d_result);
+            return ce;
+        }
         // Launch kernel with an appropriate grid and block size
         int blockSize = 256;
         int numBlocks = (N + blockSize - 1) / blockSize;
         dotProduct << <numBlocks, blockSize >> > (d_A, d_B, d_result, N);
         ce = cudaGetLastError();
-        if (ce) return ce;
-        return cudaMemcpy(result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+        if (ce) {
+            cudaFree(d_result);
+            return ce;
+        }
+        ce = cudaMemcpy(result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
+        cudaFree(d_result);
+        return ce;
 }
 EXPORT float sdotSliceCuBLAS(uint64_t handle, const float* q, const float* k, int headSize) {
     float* dQ = NULL, * dK = NULL;
@@ -769,10 +489,9 @@ EXPORT float sdotSliceCuBLAS(uint64_t handle, const float* q, const float* k, in
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
 
     float result = -12345.0f;
-    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSlice size=%d q[0]=%f k[0]=%f\n", headSize, q[0], k[0]);
-    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
-    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
+    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     cudaFree(dQ); cudaFree(dK);
     return result;
 fail:
