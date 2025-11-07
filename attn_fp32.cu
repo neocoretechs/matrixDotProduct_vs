@@ -9,7 +9,6 @@
 #include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
 #include <crt/device_functions.h>
-
 // ---------- Error helpers ----------
 #define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
@@ -25,19 +24,17 @@
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); return nullptr; } } while(0)
 #define GOCHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); goto fail; } } while(0)
+
 // ---------- Row-wise softmax ----------
 __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict__ A,
     int rows, int cols, int ldS, int ldA) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= rows) return;
-
     const float* srow = S + r * ldS;
     float* arow = A + r * ldA;
-
     // 1) max
     float m = -1e30f;
     for (int c = 0; c < cols; ++c) m = fmaxf(m, srow[c]);
-
     // 2) exp and sum
     float sum = 0.f;
     for (int c = 0; c < cols; ++c) {
@@ -45,12 +42,10 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
         arow[c] = e;
         sum += e;
     }
-
     // 3) normalize
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
-#include <cuda_fp16.h>
 
 // Q8 block: header has FP16 scale at offset 0, optional zp at offset 2
 __device__ inline float loadQ8(const uint8_t* base,int blockSize,int typeSize, int headerBytes,int index) {
@@ -104,7 +99,6 @@ __device__ inline float loadBF16(const uint8_t* base, int idx, int strideBytes) 
     memcpy(&f, &fbits, sizeof(float));
     return f;
 }
-#include <cuda_runtime.h>
 
 __global__ void dotProduct(float* A, float* B, float* result, int N) {
     // Shared memory for accumulating partial results
@@ -752,7 +746,9 @@ extern "C" {
 #endif
 cudaError_t launchDotProductKernel(float* d_A, float* d_B, float* result, int N) {
         float* d_result;
-        cudaError_t ce = cudaMemset(d_result, 0, sizeof(float));
+        cudaError_t ce = cudaMalloc((void**)&d_result, sizeof(float));
+        if (ce) return ce;
+        ce = cudaMemset(d_result, 0, sizeof(float));
         if (ce) return ce;
         // Launch kernel with an appropriate grid and block size
         int blockSize = 256;
@@ -1119,6 +1115,55 @@ void av_weighted_sum_fp32_rowmajor(
         acc += a_h[t] * v_th[i];
     }
     xb_h[i] = acc;
+}
+extern "C" __global__
+void attention_av_weighted_sum(const float* __restrict__ attTok,       // [nHeads*contextLen]
+    const uint8_t * __restrict__ vCacheRaw,  // quantized/raw bytes for V: [contextLen*kvTypeSizeTotal]
+    float* __restrict__ xbTok,              // [nHeads*headSize]
+    int nHeads, int headSize, int kvDim, int kvMul,int contextLen, int tMax,
+    // Quantization params for V (match your FloatVector format):
+    int vBlockSize,      // elements per quant block
+    int vTypeSize,       // bytes per block (header + payload)
+    int vHeaderBytes,    // bytes before payload
+    int vIsQ8         // 1 if q8, 0 otherwise
+) {
+    int h = blockIdx.x;
+    if (h >= nHeads) return;
+    int tid = threadIdx.x;
+    int stride = blockDim.x;
+    const int kvHead = h / kvMul;
+    const int attBase = h * contextLen;
+    float* xb = xbTok + h * headSize;
+    for (int i = tid; i < headSize; i += stride) {
+        float acc = 0.f;
+        // Loop over timesteps and accumulate weighted V[i]
+        for (int t = 0; t <= tMax; ++t) {
+            float w = attTok[attBase + t];
+            // Index within the kvDim slice
+            int vIndexWithinKv = kvHead * headSize + i;
+            int globalElemIndex = t * kvDim + vIndexWithinKv;
+            float v_i;
+            switch (vIsQ8) {
+            case 1: //Q8
+                v_i = loadQ8(vCacheRaw, vBlockSize, vTypeSize, vHeaderBytes, globalElemIndex);
+                break;
+            case 2: //Q4
+                v_i = loadQ4(vCacheRaw, vBlockSize, vTypeSize, vHeaderBytes, globalElemIndex);
+                break;
+            case 3: //F16
+                v_i = loadF16(vCacheRaw, vBlockSize, globalElemIndex);
+                break;
+            case 4: //BF16
+                v_i = loadBF16(vCacheRaw, vBlockSize, globalElemIndex);
+                break;
+            default: //F32
+                const float* fptr = reinterpret_cast<const float*>(vCacheRaw + globalElemIndex * vBlockSize);
+                v_i = *fptr;
+            }
+            acc += w * v_i;
+        }
+        xb[i] = acc;
+    }
 }
 extern "C" void launch_rmsnorm_fp32_rowmajor(const float* x, const float* weight, float* out, int size, float eps) {
     // One block is enough for vector sizes up to a few thousand; tune if needed
