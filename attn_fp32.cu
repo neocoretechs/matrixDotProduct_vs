@@ -48,7 +48,7 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
 }
 
 // Q8 block: header has FP16 scale at offset 0, optional zp at offset 2
-__device__ inline float loadQ8(const uint8_t* base,int blockSize,int typeSize, int headerBytes,int index) {
+__device__ inline float loadQ8(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
@@ -64,7 +64,7 @@ __device__ inline float loadQ8(const uint8_t* base,int blockSize,int typeSize, i
 }
 
 // Q4 block: header has FP16 scale at offset 0
-__device__ inline float loadQ4(const uint8_t* base,int blockSize,int typeSize,int headerBytes,int index) {
+__device__ inline float loadQ4(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
@@ -787,51 +787,54 @@ void rmsnorm_fp32_rowmajor(const float* __restrict__ x,
         out[i] = weight[i] * (inv * x[i]);
     }
 }
-extern "C" __global__
-void qk_scores_fp32_rowmajor(
-    const float* __restrict__ Q,       // [nHeads * headSize] for this token
-    const float* __restrict__ Kcache,  // global K cache, row-major
-    float* __restrict__ S,             // [nHeads * contextLength] scores for this token
-    int nHeads,
-    int headSize,
-    int contextLength,        // stride between rows (attOffset logic)
-    int kvDim,                // stride per timestep in K/V cache
-    int kvMul,                // head group divisor
-    int tMaxInclusive,        // position + token
-    float invSqrtHeadSize,
-    size_t layerBaseOffset    // base offset for curLayer in Kcache
-) {
-    int h = blockIdx.x;                   // head index
-    int t = blockIdx.y * blockDim.y + threadIdx.y; // timestep index
-    if (h >= nHeads || t > tMaxInclusive) return;
-
-    const float* q_h = Q + h * headSize;
-    const float* k_th = Kcache + layerBaseOffset + t * kvDim + (h / kvMul) * headSize;
-    float* s_row = S + h * contextLength;
-
-    // Parallel dot reduction over headSize
-    float acc = 0.f;
-    for (int i = threadIdx.x; i < headSize; i += blockDim.x) {
-        acc += q_h[i] * k_th[i];
-    }
-    // Warp reduce
-    for (int delta = 16; delta > 0; delta >>= 1) {
-        acc += __shfl_down_sync(0xffffffff, acc, delta);
-    }
-    // Shared reduce (one partial per warp)
-    __shared__ float warpSum[32]; // up to 32 warps per block
-    int warpId = threadIdx.x >> 5;
-    int lane = threadIdx.x & 31;
-    if (lane == 0) warpSum[warpId] = acc;
-    __syncthreads();
-
-    if (threadIdx.x < (blockDim.x >> 5)) {
-        float dot = warpSum[threadIdx.x];
-        // fold remaining warps
-        for (int w = threadIdx.x + 1; w < (blockDim.x >> 5); ++w) dot += warpSum[w];
-        if (threadIdx.x == 0) s_row[t] = dot * invSqrtHeadSize;
+extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int blockSize, int typeSize, int headerBytes) {
+    switch (format) {
+    case 1: // Q80
+        return loadQ8(q,index,blockSize,typeSize, headerBytes);
+    case 2: // Q4
+        return loadQ4(q, index, blockSize, typeSize, headerBytes);
+    case 3: // F16
+        return loadF16(q, index, typeSize);
+    case 4:
+        return loadBF16(q, index, typeSize);
+    default:
+        return *reinterpret_cast<const float*>(q + index * blockSize);
     }
 }
+extern "C" __global__
+void qk_scores(const float* __restrict__ Q,      // [nHeads*headSize]
+    const uint8_t * __restrict__ Kraw, // packed keys, Kcache, MemorySegment possibly quantized
+    float* __restrict__ Att,          // [nHeads*contextLen]
+    int nHeads, int headSize, int contextLen,
+    int kvDim, int kvMul, int tMax, int format, int blockSize, int typeSize, int headerBytes)
+{
+    int h = blockIdx.x;  // one block per head
+    if (h >= nHeads) return;
+
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int kvHead = h / kvMul;
+    const float* q = Q + h * headSize;
+
+    for (int t = 0; t <= tMax; ++t) {
+        // compute partial dot over i stride
+        float sum = 0.f;
+        int base = t * kvDim + kvHead * headSize;
+        for (int i = tid; i < headSize; i += blockDim.x) {
+            float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);/* dequant/load Kraw at base + i */;
+            sum += q[i] * k_i;
+        }
+        smem[tid] = sum;
+        __syncthreads();
+        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+            if (tid < s) smem[tid] += smem[tid + s];
+            __syncthreads();
+        }
+        if (tid == 0) Att[h * contextLen + t] = smem[0];
+        __syncthreads();
+    }
+}
+
 extern "C" __global__
 void av_weighted_sum_fp32_rowmajor(
     const float* __restrict__ A,       // [nHeads * contextLength] attention weights
@@ -942,9 +945,9 @@ extern "C" void launch_attention_av_weighted_sum(
     attention_av_weighted_sum << <grid, block >> > ( d_attTok, d_vCacheRaw, d_xbTok, nHeads, headSize, kvDim, kvMul, contextLen, tMax, vBlockSize, vTypeSize, vHeaderBytes, vFormat);
     cudaDeviceSynchronize();
 }
-extern "C" void launch_qk_scores_fp32_rowmajor(const float* Q, const float* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, float invSqrtHeadSize, size_t layerBaseOffset) {
+extern "C" void launch_qk_scores_fp32_rowmajor(const float* Q, const uint8_t* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, int format, int blockSize, int typeSize, int headerBytes) {
     int threads = 256;
-    qk_scores_fp32_rowmajor << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, invSqrtHeadSize, layerBaseOffset);
+    qk_scores << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, format, blockSize, typeSize, headerBytes);
     cudaDeviceSynchronize();
 }
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {

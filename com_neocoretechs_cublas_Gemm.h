@@ -204,7 +204,7 @@ EXPORT void launch_attention_av_weighted_sum(
     int   // default launch config thread per block
 );
 
-EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const float*, float*, int, int, int, int, int, int, float, size_t);
+EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const uint8_t*, float*, int, int, int, int, int, int, int, int, int, int);
 
 EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 #ifdef __cplusplus
