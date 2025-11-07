@@ -209,15 +209,17 @@ JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Attn_convertBufferToFloat(J
 
 JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jclass, jlong, jobject, jint, jobject, jint, jint);
 
-EXPORT float sdotSlice(uint64_t, const float*, const float*, int);
+EXPORT float sdotSliceCuBLAS(uint64_t, const float*, const float*, int);
 
-EXPORT float sdotSliceQ8(uint64_t, const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSlice(const float*, const float*, int);
 
-EXPORT float sdotSliceQ4(uint64_t, const uint8_t*, const float*, int, int, int, int, int);
+EXPORT float sdotSliceQ8(const uint8_t*, const float*, int, int, int, int, int);
 
-EXPORT float sdotSliceF16(uint64_t, const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
 
-EXPORT float sdotSliceBF16(uint64_t, const uint8_t*, const float*, int, int, int);
+EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
+
+EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
 
 EXPORT uint64_t cublasHandle();
 
@@ -227,7 +229,14 @@ EXPORT int cudaGetMemInfo(size_t*, size_t*);
 
 EXPORT void launch_rmsnorm_fp32_rowmajor(const float*, const float*, float*, int, float);
 
-EXPORT void launch_av_weighted_sum_fp32_rowmajor(const float*, const float*, float*, int, int, int, int, int, int, size_t);
+EXPORT void launch_attention_av_weighted_sum(
+    const float*,       // device pointer [nHeads*contextLen]
+    const uint8_t*,  // device pointer [contextLen*kvTypeSizeTotal]
+    float*,              // device pointer [nHeads*headSize]
+    int, int, int, int, int, int, int, int, int,
+    int,                 // 1=Q8, 2=Q4, 3=F16, 4=BF16, 5=F32
+    int   // default launch config thread per block
+);
 
 EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const float*, float*, int, int, int, int, int, int, float, size_t);
 

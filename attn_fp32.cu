@@ -739,7 +739,7 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv* env
     }
     const float* qHost = reinterpret_cast<const float*>(qHostBase) + qOffsetFloats;
     const float* kHost = reinterpret_cast<const float*>(kHostBase) + kOffsetFloats;
-    return sdotSlice((uint64_t)handle, qHost, kHost, headSize);
+    return sdotSliceCuBLAS((uint64_t)handle, qHost, kHost, headSize);
  } 
 #ifdef __cplusplus
 extern "C" {
@@ -758,18 +758,18 @@ cudaError_t launchDotProductKernel(float* d_A, float* d_B, float* result, int N)
         if (ce) return ce;
         return cudaMemcpy(result, d_result, sizeof(float), cudaMemcpyDeviceToHost);
 }
-EXPORT float sdotSlice(uint64_t handle, const float* q, const float* k, int headSize) {
+EXPORT float sdotSliceCuBLAS(uint64_t handle, const float* q, const float* k, int headSize) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
     ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
     ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
- 
+
     ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    
+
     float result = -12345.0f;
-    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSlice size=%d q[0]=%f k[0]=%f\n", headSize, q[0], k[0]);
     //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
@@ -780,7 +780,29 @@ fail:
     if (dK) cudaFree(dK);
     return NAN;
 }
-EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
+EXPORT float sdotSlice(const float* q, const float* k, int headSize) {
+    float* dQ = NULL, * dK = NULL;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
+    ce = cudaMalloc((void**)&dK, bytes); GOCHECK_CUDA(ce);
+ 
+    ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    
+    float result = -12345.0f;
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //printf("sdotSlice size=%d q[0]=%f k[0]=%f\n", headSize, q[0], k[0]);
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
+    cudaFree(dQ); cudaFree(dK);
+    return result;
+fail:
+    if (dQ) cudaFree(dQ);
+    if (dK) cudaFree(dK);
+    return NAN;
+}
+EXPORT float sdotSliceQ8(const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
@@ -812,7 +834,7 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
     ce = cudaMemcpy(dK, k, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
 
     float result = -123435.0f;
-    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSliceQ8 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
     //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
     GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
@@ -824,7 +846,7 @@ EXPORT float sdotSliceQ8(uint64_t handle, const uint8_t* q, const float* k, int 
         if(h_stage)cudaFreeHost(h_stage);
         return NAN;
  }
-float sdotSliceQ4(uint64_t handle, const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
+float sdotSliceQ4(const uint8_t* q, const float* k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
@@ -873,9 +895,10 @@ float sdotSliceQ4(uint64_t handle, const uint8_t* q, const float* k, int headSiz
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     */
     float result = -123435.0f;
-    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSliceQ4 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
-    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
@@ -885,7 +908,7 @@ fail:
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
-float sdotSliceF16(uint64_t handle, const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
+float sdotSliceF16(const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
@@ -912,9 +935,10 @@ float sdotSliceF16(uint64_t handle, const uint8_t* q, const float* k, int headSi
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     */
     float result = -123435.0f;
-    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSliceF16 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
-    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
@@ -924,7 +948,7 @@ fail:
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
-float sdotSliceBF16(uint64_t handle, const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
+float sdotSliceBF16(const uint8_t* q, const float* k, int headSize, int index, int typeSize) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);
     cudaError_t ce;
@@ -951,9 +975,10 @@ float sdotSliceBF16(uint64_t handle, const uint8_t* q, const float* k, int headS
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     */
     float result = -123435.0f;
-    cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
+    //cublasSetPointerMode((cublasHandle_t)handle, CUBLAS_POINTER_MODE_HOST);
     //printf("sdotSliceBF16 size=%d q[0]=%f k[0]=%f\n", headSize, h_stage[0], k[0]);
-    GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    //GOCHECK_CUBLAS(cublasSdot((cublasHandle_t)handle, headSize, (const float*)dQ, 1, (const float*)dK, 1, &result));
+    GOCHECK_CUDA(launchDotProductKernel((float*)dQ, (float*)dK, &result, headSize));
     ce = cudaGetLastError(); GOCHECK_CUDA(ce);
     cudaFree(dQ); cudaFree(dK); cudaFreeHost(h_stage);
     return result;
@@ -1172,9 +1197,30 @@ extern "C" void launch_rmsnorm_fp32_rowmajor(const float* x, const float* weight
     NCHECK_CUDA(cudaGetLastError());
     cudaDeviceSynchronize();
 }
-extern "C" void launch_av_weighted_sum_fp32_rowmajor(const float* Q, const float* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, size_t layerBaseOffset) {
-    int threads = 256;
-    av_weighted_sum_fp32_rowmajor << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, layerBaseOffset);
+/*
+* Java loop
+*for (t) {
+*  float a = att[h,t];
+*  for (i) xb[h,i] += a * v[t,h,i];
+*}
+* CUDA kernel
+*for (i in parallel) {
+*  float acc = 0;
+*  for (t) acc += att[h,t] * v[t,h,i];
+*  xb[h,i] = acc;
+*}
+*/
+extern "C" void launch_attention_av_weighted_sum(
+    const float* d_attTok,       // device pointer [nHeads*contextLen]
+    const uint8_t* d_vCacheRaw,  // device pointer [contextLen*kvTypeSizeTotal]
+    float* d_xbTok,              // device pointer [nHeads*headSize]
+    int nHeads, int headSize, int kvDim, int kvMul, int contextLen,int tMax, int vBlockSize,int vTypeSize, int vHeaderBytes,
+    int vFormat,                 // 1=Q8, 2=Q4, 3=F16, 4=BF16, 5=F32
+    int threadsPerBlock = 128    // default launch config
+) {
+    dim3 grid(nHeads);
+    dim3 block(threadsPerBlock);
+    attention_av_weighted_sum << <grid, block >> > ( d_attTok, d_vCacheRaw, d_xbTok, nHeads, headSize, kvDim, kvMul, contextLen, tMax, vBlockSize, vTypeSize, vHeaderBytes, vFormat);
     cudaDeviceSynchronize();
 }
 extern "C" void launch_qk_scores_fp32_rowmajor(const float* Q, const float* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, float invSqrtHeadSize, size_t layerBaseOffset) {
