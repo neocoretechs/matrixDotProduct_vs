@@ -955,7 +955,23 @@ extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int 
     row_softmax_fp32 << <1, threads >> > (S, A, rows, cols, ldS, ldA);
     cudaDeviceSynchronize();
 }
-
+extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, size_t bytes) {
+    NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyHostToDevice));
+}
+extern "C" void copyDeviceToHost(uint64_t d_tensor, uint8_t* tensor, size_t bytes) {
+    NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyDeviceToHost));
+}
+extern "C" uint64_t allocDevicePtr(size_t bytes) {
+    uint8_t* d_tensor = nullptr;
+    GOCHECK_CUDA(cudaMalloc((void**)&d_tensor, bytes));
+    return (uint64_t)d_tensor;
+fail:
+    if (d_tensor) cudaFree(d_tensor);
+    return NULL;
+}
+extern "C" void freeDevicePtr(uint64_t d_tensor) {
+    if (d_tensor) cudaFree((uint8_t*)d_tensor);
+}
 #ifdef __cplusplus
 }
 #endif
