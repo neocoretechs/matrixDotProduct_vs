@@ -830,7 +830,7 @@ void qk_scores(const float* __restrict__ Q,      // [nHeads*headSize]
             if (tid < s) smem[tid] += smem[tid + s];
             __syncthreads();
         }
-        if (tid == 0) Att[h * contextLen + t] = smem[0];
+        if (tid == 0) Att[h * contextLen + t] = smem[0] / sqrtf(headSize);
         __syncthreads();
     }
 }
@@ -856,6 +856,8 @@ void av_weighted_sum_fp32_rowmajor(
     float* xb_h = Xb + h * headSize;
 
     float acc = 0.f;
+    // layerBaseOffset must be in “elements” (not bytes). 
+    // If it’s bytes, convert: reinterpret_cast<const float*>((const char*)Vcache + layerBaseOffset).
 #pragma unroll 4
     for (int t = 0; t <= tMaxInclusive; ++t) {
         const float* v_th = Vcache + layerBaseOffset + t * kvDim + (h / kvMul) * headSize;
@@ -889,24 +891,7 @@ void attention_av_weighted_sum(const float* __restrict__ attTok,       // [nHead
             // Index within the kvDim slice
             int vIndexWithinKv = kvHead * headSize + i;
             int globalElemIndex = t * kvDim + vIndexWithinKv;
-            float v_i;
-            switch (vIsQ8) {
-            case 1: //Q8
-                v_i = loadQ8(vCacheRaw, vBlockSize, vTypeSize, vHeaderBytes, globalElemIndex);
-                break;
-            case 2: //Q4
-                v_i = loadQ4(vCacheRaw, vBlockSize, vTypeSize, vHeaderBytes, globalElemIndex);
-                break;
-            case 3: //F16
-                v_i = loadF16(vCacheRaw, vBlockSize, globalElemIndex);
-                break;
-            case 4: //BF16
-                v_i = loadBF16(vCacheRaw, vBlockSize, globalElemIndex);
-                break;
-            default: //F32
-                const float* fptr = reinterpret_cast<const float*>(vCacheRaw + globalElemIndex * vBlockSize);
-                v_i = *fptr;
-            }
+            float v_i = dquant(vCacheRaw, globalElemIndex, vIsQ8, vBlockSize, vTypeSize, vHeaderBytes);
             acc += w * v_i;
         }
         xb[i] = acc;
