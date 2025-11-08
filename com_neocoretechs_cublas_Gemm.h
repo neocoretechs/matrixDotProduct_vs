@@ -193,13 +193,13 @@ EXPORT void cublasHandleDestroy(uint64_t);
 
 EXPORT int cudaGetMemInfo(size_t*, size_t*);
 
-EXPORT uint64_t allocDevicePtr(size_t bytes);
+EXPORT uint64_t allocDevicePtr(int bytes);
 
 EXPORT void freeDevicePtr(uint64_t d_tensor);
 
-EXPORT void copyHostToDevice(uint8_t*, uint64_t, size_t);
+EXPORT void copyHostToDevice(uint8_t*, uint64_t, int);
 
-EXPORT void copyDeviceToHost(uint64_t, uint8_t*, size_t bytes);
+EXPORT void copyDeviceToHost(uint64_t, uint8_t*, int);
 
 EXPORT void launch_rmsnorm_fp32_rowmajor(const float*, const float*, float*, int, float);
 
