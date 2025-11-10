@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <cuda_fp16.h>
+#include <math.h>
 #include <device_launch_parameters.h>
 #include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
@@ -46,7 +47,25 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
-
+__global__ void row_softmax_inplace_fp32(float* __restrict__ S,
+    int rows, int cols, int ldS) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= rows) return;
+    float* srow = S + r * ldS;
+    // 1) max
+    float m = -1e30f;
+    for (int c = 0; c < cols; ++c) m = fmaxf(m, srow[c]);
+    // 2) exp and sum (overwrite in place)
+    float sum = 0.f;
+    for (int c = 0; c < cols; ++c) {
+        float e = __expf(srow[c] - m);
+        srow[c] = e;
+        sum += e;
+    }
+    // 3) normalize
+    float inv = 1.0f / sum;
+    for (int c = 0; c < cols; ++c) srow[c] *= inv;
+}
 // Q8 block: header has FP16 scale at offset 0, optional zp at offset 2
 __device__ inline float loadQ8(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
     int blockIndex = index / blockSize;
@@ -801,51 +820,108 @@ extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int 
         return *reinterpret_cast<const float*>(q + index * blockSize);
     }
 }
+
 extern "C" __global__
-void qk_scores(const float* __restrict__ Q,      // [nHeads * headSize]
+void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
     const uint8_t* __restrict__ Kraw, // packed keys
-    float* __restrict__ Att,          // [nHeads * contextLen]
-    float* __restrict__ buf,          // length of Q dequant buffer
+    float* __restrict__ Att,        // [nHeads * contextLen] (outputs softmax weights)
     int nHeads, int headSize, int contextLen,
-    int kvDim, int kvMul, int tMax, int tensorSize, float sqrtHeadSize,
+    int kvDim, int kvMul, int tMax, float sqrtHeadSize,
     int format, int blockSize, int typeSize, int headerBytes)
 {
-    // Use dynamic shared memory sized to blockDim.x
-    extern __shared__ float smem[];
+    extern __shared__ float smem[]; // size >= blockDim.x
+    int h = blockIdx.x;           // one block per head
     int tid = threadIdx.x;
-    int gid = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
-
-    float sum = 0.f;
-    int h = blockIdx.x;
-    int attOffset = h * contextLen;
-    float res = 0.0f;
-    for (int t = 0; t <= tMax; t++) {
-        int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
-        // stride per KV head region is (kvMul * headSize), not headSize
-        int cnt = 0;
-        for (int i = 0; i < tensorSize; i++) {
-            float k_i = dquant(Kraw, keyCacheOffset + i, format, blockSize, typeSize, headerBytes);
-            buf[cnt++] = k_i;
-        }
-        //dotProductDevice(Q, buf, &res, tensorSize);
-        //extern "C" __device__ void dotProductDevice(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ result, int N) { 
-        for (int i = gid; i < tensorSize; i += stride) {
-            sum += Q[i] * buf[i];
-        }
-        smem[tid] = sum;
-        __syncthreads();
-        // Reduce within block
-        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-            if (tid < s) smem[tid] += smem[tid + s];
+    int attBase = h * contextLen;
+    // Phase 1: compute raw scores per timestep t
+    if (tMax == contextLen - 1) {
+        for (int t = 0; t <= tMax; ++t) {
+            // Map this head to the correct KV slice
+            int kvHead = h / kvMul;
+            int kvOffset = (h % kvMul) * headSize;
+            int base = t * kvDim + kvHead * (kvMul * headSize) + kvOffset;
+            // Per-thread partial dot over headSize
+            float sum = 0.f;
+            for (int i = tid; i < headSize; i += blockDim.x) {
+                float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);
+                float q_i = Q[h * headSize + i];
+                sum += q_i * k_i;
+            }
+            // Block reduction to a single score
+            smem[tid] = sum;
+            __syncthreads();
+            for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+                if (tid < s) smem[tid] += smem[tid + s];
+                __syncthreads();
+            }
+            if (tid == 0) {
+                Att[attBase + t] = smem[0] / sqrtHeadSize; // raw score
+            }
             __syncthreads();
         }
-        // One atomicAdd per block
-        if (tid == 0) atomicAdd(&res, smem[0]);
-        res /= sqrtHeadSize;
-        Att[attOffset + t] = res;
+    }
+    else {
+        for (int t = 0; t < contextLen; ++t) {
+            // Map this head to the correct KV slice
+            int kvHead = h / kvMul;
+            int kvOffset = (h % kvMul) * headSize;
+            int base = t * kvDim + kvHead * (kvMul * headSize) + kvOffset;
+            // Per-thread partial dot over headSize
+            float sum = 0.f;
+            for (int i = tid; i < headSize; i += blockDim.x) {
+                float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);
+                float q_i = Q[h * headSize + i];
+                sum += q_i * k_i;
+            }
+            // Block reduction to a single score
+            smem[tid] = sum;
+            __syncthreads();
+            for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+                if (tid < s) smem[tid] += smem[tid + s];
+                __syncthreads();
+            }
+            if (tid == 0) {
+                Att[attBase + t] = smem[0] / sqrtHeadSize; // raw score
+            }
+            __syncthreads();
+        }
+    }
+    // Phase 2: softmax over t for this head
+    // Compute max for numerical stability
+    /*
+    float tMaxVal = -1e20f;
+    for (int t = tid; t <= tMax; t += blockDim.x) {
+        tMaxVal = fmaxf(tMaxVal, Att[attBase + t]);
+    }
+    // Reduce max in block
+    smem[tid] = tMaxVal;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) smem[tid] = fmaxf(smem[tid], smem[tid + s]);
         __syncthreads();
     }
+    float maxScore = smem[0];
+    __syncthreads();
+    // Exponentiate and sum
+    float localSum = 0.f;
+    for (int t = tid; t <= tMax; t += blockDim.x) {
+        float e = expf(Att[attBase + t] - maxScore);
+        Att[attBase + t] = e; // store temporary exp
+        localSum += e;
+    }
+    smem[tid] = localSum;
+    __syncthreads();
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) smem[tid] += smem[tid + s];
+        __syncthreads();
+    }
+    float denom = smem[0];
+    __syncthreads();
+    // Normalize to final softmax weights
+    for (int t = tid; t <= tMax; t += blockDim.x) {
+        Att[attBase + t] = Att[attBase + t] / denom;
+    }
+    */
 }
 
 extern "C" __global__
@@ -951,11 +1027,7 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
     int format, int blockSize, int typeSize, int headerBytes)
 {
     int threads = 256; // safe starting point; raise after correctness
-    int blockSizeGrid = 256;
-    int numBlocks = (tensorSize + blockSizeGrid - 1) / blockSizeGrid;
-    float* buf = NULL;
-    printf("trying malloc:%d\n", tensorSize);
-    NCHECK_CUDA(cudaMalloc(&buf, (size_t)(tensorSize * sizeof(float))));
+   
     int token = (int)(ht / nHeads);
     int h = (int)(ht % nHeads);
     // get the query vector for this head
@@ -964,14 +1036,18 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
     // attention scores for this head
     // float* att = s.att + h * config.seq_len;
     int attOffset = h * contextLength;
-    qk_scores << <numBlocks, blockSizeGrid >> > (
-        Q, K, S, buf,
+    qk_scores_softmax << <nHeads, threads>> > (
+        Q, K, S,
         nHeads, headSize, contextLength,
-        kvDim, kvMul, tMaxInclusive, tensorSize, sqrtHeadSize,
+        kvDim, kvMul, tMaxInclusive, sqrtHeadSize,
         format, blockSize, typeSize, headerBytes);
+    // Phase 2: softmax
+ 
+    int blocks = (nHeads + threads - 1) / threads;
+    row_softmax_inplace_fp32 << <blocks, threads >> > (S, nHeads, contextLength, contextLength);
+
     NCHECK_CUDA(cudaDeviceSynchronize());
     NCHECK_CUDA(cudaGetLastError());
-    NCHECK_CUDA(cudaFree(buf));
 }
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
     int threads = 256;
