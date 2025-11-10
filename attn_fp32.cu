@@ -150,27 +150,7 @@ extern "C" __global__ void dotProduct(const float* __restrict__ A, const float* 
         // One atomicAdd per block
         if (tid == 0) atomicAdd(result, smem[0]);
 }
-extern "C" __device__ void dotProductDevice(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ result, int N) {
-    // Use dynamic shared memory sized to blockDim.x
-    extern __shared__ float smem[];
-    int tid = threadIdx.x;
-    int gid = blockIdx.x * blockDim.x + tid;
-    int stride = blockDim.x * gridDim.x;
 
-    float sum = 0.f;
-    for (int i = gid; i < N; i += stride) {
-        sum += A[i] * B[i];
-    }
-    smem[tid] = sum;
-    __syncthreads();
-    // Reduce within block
-    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-        if (tid < s) smem[tid] += smem[tid + s];
-        __syncthreads();
-    }
-    // One atomicAdd per block
-    if (tid == 0) atomicAdd(result, smem[0]);
-}
 static inline float halfToFloat(uint16_t h) {
     uint16_t h_exp = (h & 0x7C00u);
     uint16_t h_sig = (h & 0x03FFu);
@@ -830,8 +810,13 @@ void qk_scores(const float* __restrict__ Q,      // [nHeads * headSize]
     int kvDim, int kvMul, int tMax, int tensorSize, float sqrtHeadSize,
     int format, int blockSize, int typeSize, int headerBytes)
 {
-    int blockSizeGrid = 256;
-    int numBlocks = (tensorSize + blockSizeGrid - 1) / blockSizeGrid;
+    // Use dynamic shared memory sized to blockDim.x
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
+
+    float sum = 0.f;
     int h = blockIdx.x;
     int attOffset = h * contextLen;
     float res = 0.0f;
@@ -843,12 +828,24 @@ void qk_scores(const float* __restrict__ Q,      // [nHeads * headSize]
             float k_i = dquant(Kraw, keyCacheOffset + i, format, blockSize, typeSize, headerBytes);
             buf[cnt++] = k_i;
         }
-        dotProductDevice(Q, buf, &res, tensorSize);
+        //dotProductDevice(Q, buf, &res, tensorSize);
+        //extern "C" __device__ void dotProductDevice(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ result, int N) { 
+        for (int i = gid; i < tensorSize; i += stride) {
+            sum += Q[i] * buf[i];
+        }
+        smem[tid] = sum;
+        __syncthreads();
+        // Reduce within block
+        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+            if (tid < s) smem[tid] += smem[tid + s];
+            __syncthreads();
+        }
+        // One atomicAdd per block
+        if (tid == 0) atomicAdd(&res, smem[0]);
         res /= sqrtHeadSize;
         Att[attOffset + t] = res;
         __syncthreads();
     }
- 
 }
 
 extern "C" __global__
@@ -957,7 +954,8 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
     int blockSizeGrid = 256;
     int numBlocks = (tensorSize + blockSizeGrid - 1) / blockSizeGrid;
     float* buf = NULL;
-    NCHECK_CUDA(cudaMalloc((void**)&buf, (size_t)(tensorSize * sizeof(float))));
+    printf("trying malloc:%d\n", tensorSize);
+    NCHECK_CUDA(cudaMalloc(&buf, (size_t)(tensorSize * sizeof(float))));
     int token = (int)(ht / nHeads);
     int h = (int)(ht % nHeads);
     // get the query vector for this head
@@ -971,9 +969,9 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
         nHeads, headSize, contextLength,
         kvDim, kvMul, tMaxInclusive, tensorSize, sqrtHeadSize,
         format, blockSize, typeSize, headerBytes);
+    NCHECK_CUDA(cudaDeviceSynchronize());
     NCHECK_CUDA(cudaGetLastError());
     NCHECK_CUDA(cudaFree(buf));
-    cudaDeviceSynchronize(); 
 }
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
     int threads = 256;
@@ -996,6 +994,13 @@ fail:
 }
 extern "C" void freeDevicePtr(uint64_t d_tensor) {
     if (d_tensor) cudaFree((uint8_t*)d_tensor);
+}
+extern "C" void cudaInit() {
+    NCHECK_CUDA(cudaSetDevice(0));
+    NCHECK_CUDA(cudaFree(0)); // init
+    size_t freeB = 0, totalB = 0;
+    NCHECK_CUDA(cudaMemGetInfo(&freeB, &totalB));
+    printf("GPU mem free=%zu total=%zu\n", freeB, totalB);
 }
 #ifdef __cplusplus
 }
