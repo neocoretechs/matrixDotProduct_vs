@@ -150,7 +150,27 @@ extern "C" __global__ void dotProduct(const float* __restrict__ A, const float* 
         // One atomicAdd per block
         if (tid == 0) atomicAdd(result, smem[0]);
 }
+extern "C" __device__ void dotProductDevice(const float* __restrict__ A, const float* __restrict__ B, float* __restrict__ result, int N) {
+    // Use dynamic shared memory sized to blockDim.x
+    extern __shared__ float smem[];
+    int tid = threadIdx.x;
+    int gid = blockIdx.x * blockDim.x + tid;
+    int stride = blockDim.x * gridDim.x;
 
+    float sum = 0.f;
+    for (int i = gid; i < N; i += stride) {
+        sum += A[i] * B[i];
+    }
+    smem[tid] = sum;
+    __syncthreads();
+    // Reduce within block
+    for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
+        if (tid < s) smem[tid] += smem[tid + s];
+        __syncthreads();
+    }
+    // One atomicAdd per block
+    if (tid == 0) atomicAdd(result, smem[0]);
+}
 static inline float halfToFloat(uint16_t h) {
     uint16_t h_exp = (h & 0x7C00u);
     uint16_t h_sig = (h & 0x03FFu);
@@ -802,37 +822,33 @@ extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int 
     }
 }
 extern "C" __global__
-void qk_scores(const float* __restrict__ Q,      // [nHeads*headSize]
-    const uint8_t * __restrict__ Kraw, // packed keys, Kcache, MemorySegment possibly quantized
-    float* __restrict__ Att,          // [nHeads*contextLen]
+void qk_scores(const float* __restrict__ Q,      // [nHeads * headSize]
+    const uint8_t* __restrict__ Kraw, // packed keys
+    float* __restrict__ Att,          // [nHeads * contextLen]
+    float* __restrict__ buf,          // length of Q dequant buffer
     int nHeads, int headSize, int contextLen,
-    int kvDim, int kvMul, int tMax, int format, int blockSize, int typeSize, int headerBytes)
+    int kvDim, int kvMul, int tMax, int tensorSize, float sqrtHeadSize,
+    int format, int blockSize, int typeSize, int headerBytes)
 {
-    int h = blockIdx.x;  // one block per head
-    if (h >= nHeads) return;
-
-    extern __shared__ float smem[];
-    int tid = threadIdx.x;
-    int kvHead = h / kvMul;
-    const float* q = Q + h * headSize;
-
-    for (int t = 0; t <= tMax; ++t) {
-        // compute partial dot over i stride
-        float sum = 0.f;
-        int base = t * kvDim + kvHead * headSize;
-        for (int i = tid; i < headSize; i += blockDim.x) {
-            float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);/* dequant/load Kraw at base + i */;
-            sum += q[i] * k_i;
+    int blockSizeGrid = 256;
+    int numBlocks = (tensorSize + blockSizeGrid - 1) / blockSizeGrid;
+    int h = blockIdx.x;
+    int attOffset = h * contextLen;
+    float res = 0.0f;
+    for (int t = 0; t <= tMax; t++) {
+        int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
+        // stride per KV head region is (kvMul * headSize), not headSize
+        int cnt = 0;
+        for (int i = 0; i < tensorSize; i++) {
+            float k_i = dquant(Kraw, keyCacheOffset + i, format, blockSize, typeSize, headerBytes);
+            buf[cnt++] = k_i;
         }
-        smem[tid] = sum;
-        __syncthreads();
-        for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-            if (tid < s) smem[tid] += smem[tid + s];
-            __syncthreads();
-        }
-        if (tid == 0) Att[h * contextLen + t] = smem[0] / sqrtf(headSize);
+        dotProductDevice(Q, buf, &res, tensorSize);
+        res /= sqrtHeadSize;
+        Att[attOffset + t] = res;
         __syncthreads();
     }
+ 
 }
 
 extern "C" __global__
@@ -930,10 +946,34 @@ extern "C" void launch_attention_av_weighted_sum(
     attention_av_weighted_sum << <grid, block >> > ( d_attTok, d_vCacheRaw, d_xbTok, nHeads, headSize, kvDim, kvMul, contextLen, tMax, vBlockSize, vTypeSize, vHeaderBytes, vFormat);
     cudaDeviceSynchronize();
 }
-extern "C" void launch_qk_scores_fp32_rowmajor(const float* Q, const uint8_t* K, float* S, int nHeads, int headSize, int contextLength, int kvDim, int kvMul, int tMaxInclusive, int format, int blockSize, int typeSize, int headerBytes) {
-    int threads = 256;
-    qk_scores << <1, threads >> > (Q, K, S, nHeads, headSize, contextLength, kvDim, kvMul, tMaxInclusive, format, blockSize, typeSize, headerBytes);
-    cudaDeviceSynchronize();
+
+extern "C" void launch_qk_scores_fp32_rowmajor(
+    const float* Q, const uint8_t* K, float* S,
+    int ht, int nHeads, int headSize, int contextLength,
+    int kvDim, int kvMul, int tMaxInclusive, int tensorSize, float sqrtHeadSize,
+    int format, int blockSize, int typeSize, int headerBytes)
+{
+    int threads = 256; // safe starting point; raise after correctness
+    int blockSizeGrid = 256;
+    int numBlocks = (tensorSize + blockSizeGrid - 1) / blockSizeGrid;
+    float* buf = NULL;
+    NCHECK_CUDA(cudaMalloc((void**)&buf, (size_t)(tensorSize * sizeof(float))));
+    int token = (int)(ht / nHeads);
+    int h = (int)(ht % nHeads);
+    // get the query vector for this head
+    // float* q = s.q + h * headSize;
+    int qOffset = h * headSize;
+    // attention scores for this head
+    // float* att = s.att + h * config.seq_len;
+    int attOffset = h * contextLength;
+    qk_scores << <numBlocks, blockSizeGrid >> > (
+        Q, K, S, buf,
+        nHeads, headSize, contextLength,
+        kvDim, kvMul, tMaxInclusive, tensorSize, sqrtHeadSize,
+        format, blockSize, typeSize, headerBytes);
+    NCHECK_CUDA(cudaGetLastError());
+    NCHECK_CUDA(cudaFree(buf));
+    cudaDeviceSynchronize(); 
 }
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
     int threads = 256;

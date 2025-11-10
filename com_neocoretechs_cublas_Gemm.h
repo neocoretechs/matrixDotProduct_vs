@@ -211,8 +211,15 @@ EXPORT void launch_attention_av_weighted_sum(
     int,                 // 1=Q8, 2=Q4, 3=F16, 4=BF16, 5=F32
     int   // default launch config thread per block
 );
-
-EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const uint8_t*, float*, int, int, int, int, int, int, int, int, int, int);
+/*
+* launch_qk_scores_fp32_rowmajor(
+*    const float* Q, const uint8_t* K, float* S,
+*    int h, int nHeads, int headSize, int contextLength,
+*    int kvDim, int kvMul, int tMaxInclusive, int tensorSize, float sqrtHeadSize,
+*    int format, int blockSize, int typeSize, int headerBytes)
+*
+*/
+EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const uint8_t*, float*, int, int, int, int, int, int, int, int, float, int, int, int, int);
 
 EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 #ifdef __cplusplus
