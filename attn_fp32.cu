@@ -779,7 +779,8 @@ EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize
 */
 EXPORT float sdotSliceDevice(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    float* result, int N) {
+    int N) {
+    float* result;
     GOCHECK_CUDA(launchDotProductKernel(
         qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,

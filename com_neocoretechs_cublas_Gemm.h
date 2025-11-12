@@ -177,7 +177,7 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jc
 
 EXPORT float sdotSliceCuBLAS(uint64_t, const float*, const float*, int);
 
-EXPORT float sdotSliceDevice(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, float*, int);
+EXPORT float sdotSliceDevice(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, int);
 
 EXPORT uint64_t cublasHandle();
 
