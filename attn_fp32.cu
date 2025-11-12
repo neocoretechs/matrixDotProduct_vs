@@ -6,10 +6,8 @@
 #include <algorithm>
 #include <cuda_fp16.h>
 #include <math.h>
-#include <device_launch_parameters.h>
 #include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
-#include <crt/device_functions.h>
 // ---------- Error helpers ----------
 #define CHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
   fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return -1; } } while(0)
@@ -787,35 +785,57 @@ fail:
     if (dK) cudaFree(dK);
     return NAN;
 }
+EXPORT float getFloat(const uint64_t q, int index, int blockSize, int typeSize, int headerBytes) {
+    const float* d_q = reinterpret_cast<const float*>(q);
+    float value = 0.0f;
+    NCHECK_CUDA(cudaMemcpy(&value, d_q + index, sizeof(float), cudaMemcpyDeviceToHost));
+    NCHECK_CUDA(cudaDeviceSynchronize());
+    return value;
+}
+EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize, int headerBytes) {
+    const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
+    uint8_t* h_q = nullptr;
+    uint16_t* s_q = nullptr;
+    int blockIndex = index / blockSize;
+    int withinBlockIndex = index % blockSize;
+    int blockOffset = blockIndex * typeSize;
+    NCHECK_CUDA(cudaMallocHost(&h_q, 1));
+    NCHECK_CUDA(cudaMallocHost(&s_q, 2));
+    // read byte
+    NCHECK_CUDA(cudaMemcpy(h_q, (d_q + blockOffset + headerBytes + withinBlockIndex), 1, cudaMemcpyDeviceToHost));
+    // read short
+    NCHECK_CUDA(cudaMemcpy(s_q, (d_q + blockOffset), 2, cudaMemcpyDeviceToHost));
+    int quant = *h_q;
+    float scale = halfToFloat(*s_q);
+    NCHECK_CUDA(cudaFreeHost(h_q));
+    NCHECK_CUDA(cudaFreeHost(s_q));
+    printf("GPU index=%d %d %f\n",index, quant, scale);
+    return ((float)quant) * scale;
+}
 /*
 * q is Q8 quantized, k is float array
 */
-EXPORT float sdotSliceQ8Device(const uint64_t q, const uint64_t k, uint64_t thisOffset, uint64_t thatOffset, int headSize, int blockSize, int typeSize, int headerBytes) {
-    uint8_t* d_q = (uint8_t*)q;
-    float* d_k = (float*)k;
-    size_t bytes = (size_t)headSize * sizeof(float);
-
-    uint8_t* h_q = nullptr;
-    uint8_t* h_k = nullptr;
-    NCHECK_CUDA(cudaMallocHost(&h_q, typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize)));
-    NCHECK_CUDA(cudaMallocHost(&h_k, typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize)));
-    // copy from device to host
-    // copy enough bytes to cover the blocks you’ll touch
-    size_t bytesToCopy = typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize);
-    size_t bytesToCopy2 = sizeof(float) * (((int)thisOffset + headSize + blockSize - 1) / blockSize);
-    cudaMemcpy(h_q, d_q, bytesToCopy, cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_k, d_k, bytesToCopy2, cudaMemcpyDeviceToHost);
-    std::vector<float> hqv(headSize);
-    staticDquant(h_q, hqv.data(), (int)thisOffset, headSize, 1, blockSize, typeSize, headerBytes);
-
-    //size_t pos = 0;
-    //launchDquant << <(headSize+255)/256, 256>> > (dQ, h_stage, (int)thisOffset, headSize, 1, blockSize, typeSize, headerBytes);
+EXPORT float sdotSliceQ8Device(
+    const uint64_t q,         // device ptr to quantized bytes
+    const uint64_t k,         // device ptr to float vector
+    uint64_t thisOffset,      // byte-offset in q
+    uint64_t thatOffset,      // float-index offset in k
+    int headSize,             // number of elements in the dot (floats)
+    int blockSize,            // quant block size
+    int typeSize,             // bytes per quant block
+    int headerBytes           // per-block header bytes (if any)
+) {
+    // Compute dot
     float result = 0.0f;
-    for (size_t j = 0; j < headSize; j++) {
-        result += hqv[j] * h_k[j];
+    //printf("headsize=%d\n", headSize);
+    for (int j = 0; j < headSize; ++j) {
+        float dot1 = getFloatQ8(q, thisOffset + j, blockSize, typeSize, headerBytes);
+        float dot2 = getFloat(k, thatOffset + j, blockSize, typeSize, headerBytes);
+        result += dot1 * dot2;
+        printf("GPU %d.) dot1 = %f dot2 = %f result = %f\n", j, dot1, dot2, result);
     }
-    //GOCHECK_CUDA(launchDotProductKernel(h_stage, dK, &result, headSize));
-    cudaFreeHost(h_q);
+    printf("GPU final result=%f", result);
+    NCHECK_CUDA(cudaDeviceSynchronize());
     return result;
 }
 /*
