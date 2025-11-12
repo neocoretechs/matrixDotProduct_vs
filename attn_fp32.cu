@@ -684,18 +684,18 @@ cudaError_t launchDotProductKernel(const uint8_t* qA, int indexA, int formatA, i
         cudaError_t ce = cudaMalloc((void**)&d_result, sizeof(float));
         if (ce) return ce;
         ce = cudaMemset(d_result, 0, sizeof(float));
-        if (ce) {
-            cudaFree(d_result);
-            return ce;
-        }
         // Launch kernel with an appropriate grid and block size
-        int blockSize = 256;
-        int numBlocks = (N + blockSize - 1) / blockSize;
-        dotProductSetup << <numBlocks, blockSize >> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+        //int blockSize = 256;
+        //int numBlocks = (N + blockSize - 1) / blockSize;
+        // dotProductSetup << <numBlocks, blockSize >> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+         //   qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
+          //  result, N);
+        dotProductSetup << <1, 256>> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
             qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
-            result, N);
+            d_result, N);
         ce = cudaGetLastError();
         if (ce) {
+            NCHECK_CUDA(ce);
             cudaFree(d_result);
             return ce;
         }
@@ -780,12 +780,13 @@ EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize
 EXPORT float sdotSliceDevice(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
     int N) {
-    float* result;
+    float result;
     GOCHECK_CUDA(launchDotProductKernel(
         qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
-        result, N));
-    return *result;
+        &result, N));
+    GOCHECK_CUDA(cudaDeviceSynchronize());
+    return result;
 fail:
     return NAN;
 }
