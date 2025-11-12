@@ -47,11 +47,14 @@ __global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict_
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) arow[c] *= inv;
 }
+/*
+* ldS is offset, not stride
+*/
 __global__ void row_softmax_inplace_fp32(float* __restrict__ S,
     int rows, int cols, int ldS) {
     int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= rows) return;
-    float* srow = S + r * ldS;
+    float* srow = S + r + ldS;
     // 1) max
     float m = -1e30f;
     for (int c = 0; c < cols; ++c) m = fmaxf(m, srow[c]);
@@ -66,24 +69,23 @@ __global__ void row_softmax_inplace_fp32(float* __restrict__ S,
     float inv = 1.0f / sum;
     for (int c = 0; c < cols; ++c) srow[c] *= inv;
 }
-// Q8 block: header has FP16 scale at offset 0, optional zp at offset 2
-__device__ inline float loadQ8(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
+// Q8 quant
+/*__device__*/ inline float loadQ8(const uint8_t* base, int index, int blockSize, int typeSize, int headerBytes) {
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
-    // scale from header
+    // scale
     const uint8_t* hdr = base + blockOffset;
     uint16_t scaleBits = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
-    __half hscale = __ushort_as_half(scaleBits);   // reinterpret raw bits
+    __half hscale = __ushort_as_half(scaleBits);
     float scale = __half2float(hscale);
-    // quantized value
+    // payload
     const uint8_t* payload = base + blockOffset + headerBytes;
     int8_t q = reinterpret_cast<const int8_t*>(payload)[withinBlock];
-    return (float)(q) * scale;
+    return (float)q * scale;
 }
-
 // Q4 block: header has FP16 scale at offset 0
-__device__ inline float loadQ4(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
+/*__device__*/ inline float loadQ4(const uint8_t* base, int blockSize, int typeSize, int headerBytes, int index) {
     int blockIndex = index / blockSize;
     int withinBlock = index % blockSize;
     int blockOffset = blockIndex * typeSize;
@@ -102,21 +104,30 @@ __device__ inline float loadQ4(const uint8_t* base, int blockSize, int typeSize,
 }
 
 // FP16 element at stride
-__device__ inline float loadF16(const uint8_t* base, int idx, int strideBytes) {
+/*__device__*/ inline float loadF16(const uint8_t* base, int idx, int strideBytes) {
     const uint8_t* src = base + idx * strideBytes;
     uint16_t hbits = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
     __half h = __ushort_as_half(hbits);   // reinterpret raw bits
     return __half2float(h);
 }
 
-// BF16 element at stride
-__device__ inline float loadBF16(const uint8_t* base, int idx, int strideBytes) {
+
+// BF16 safer decode
+/*__device__*/ inline float loadBF16(const uint8_t* base, int idx, int strideBytes) {
     const uint8_t* src = base + idx * strideBytes;
     uint16_t bf16 = (uint16_t)src[0] | ((uint16_t)src[1] << 8);
     uint32_t fbits = ((uint32_t)bf16) << 16;
-    float f;
-    memcpy(&f, &fbits, sizeof(float));
-    return f;
+    return __half2float(fbits); //__uint_as_float(fbits);
+}
+
+extern "C" /*__device__*/ float dquant(const uint8_t* q, int index, int format, int blockSize, int typeSize, int headerBytes) {
+    switch (format) {
+    case 1: return loadQ8(q, index, blockSize, typeSize, headerBytes);
+    case 2: return loadQ4(q, index, blockSize, typeSize, headerBytes);
+    case 3: return loadF16(q, index, typeSize);
+    case 4: return loadBF16(q, index, typeSize);
+    default: return reinterpret_cast<const float*>(q)[index];
+    }
 }
 
 /*__global__ void dotProduct(float* A, float* B, float* result, int N) {
@@ -726,6 +737,159 @@ fail:
     if (h_stage)cudaFreeHost(h_stage);
     return NAN;
 }
+extern "C" __global__ void launchDquant( const uint8_t* q, float* r, int index, int size, int format, int blockSize, int typeSize, int headerBytes) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (int i = tid; i < size; i += stride) {
+        //r[i] = dquant(q, index + i, format, blockSize, typeSize, headerBytes);
+    }
+}
+static void staticDquant(const uint8_t* q, float* r, int index, int size, int format, int blockSize, int typeSize, int headerBytes) {
+    for (int i = 0; i < size; i ++) {
+        r[i] = dquant(q, index + i, format, blockSize, typeSize, headerBytes);
+    }
+}
+/*
+* q and k are device addresses cast to float, we have to move them down
+*/
+static float scalarDot(const float* d_q, const float* d_k,
+    size_t thisOffset, size_t thatOffset, size_t size) {
+    float* h_q = nullptr;
+    float* h_k = nullptr;
+    float result = 0.0f;
+    cudaError_t ce = cudaMallocHost(&h_q, size * sizeof(float));
+    if (ce != cudaSuccess) return 0.0f;
+    ce = cudaMallocHost(&h_k, size * sizeof(float));
+    if (ce != cudaSuccess) { cudaFreeHost(h_q); return 0.0f; }
+    cudaMemcpy(h_q, d_q + thisOffset, size * sizeof(float), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_k, d_k + thatOffset, size * sizeof(float), cudaMemcpyDeviceToHost);
+    for (size_t j = 0; j < size; ++j) {
+        result += h_q[j] * h_k[j];
+    }
+    cudaFreeHost(h_q);
+    cudaFreeHost(h_k);
+    return result;
+}
+/*
+* q is float array, k is quantized
+*/
+EXPORT float sdotSliceDevice(const uint64_t q, const uint64_t k, uint64_t thisOffset, uint64_t thatOffset, int headSize) {
+    float* dQ = (float*)q;
+    float* dK = (float*)k;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    float result = -12345.0f;
+    //GOCHECK_CUDA(launchDotProductKernel(dQ, dK, &result, headSize));
+    result = scalarDot(dQ, dK, (size_t)thisOffset, (size_t)thatOffset, (size_t)headSize);
+    return result;
+fail:
+    if (dQ) cudaFree(dQ);
+    if (dK) cudaFree(dK);
+    return NAN;
+}
+/*
+* q is Q8 quantized, k is float array
+*/
+EXPORT float sdotSliceQ8Device(const uint64_t q, const uint64_t k, uint64_t thisOffset, uint64_t thatOffset, int headSize, int blockSize, int typeSize, int headerBytes) {
+    uint8_t* d_q = (uint8_t*)q;
+    float* d_k = (float*)k;
+    size_t bytes = (size_t)headSize * sizeof(float);
+
+    uint8_t* h_q = nullptr;
+    uint8_t* h_k = nullptr;
+    NCHECK_CUDA(cudaMallocHost(&h_q, typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize)));
+    NCHECK_CUDA(cudaMallocHost(&h_k, typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize)));
+    // copy from device to host
+    // copy enough bytes to cover the blocks you’ll touch
+    size_t bytesToCopy = typeSize * (((int)thisOffset + headSize + blockSize - 1) / blockSize);
+    size_t bytesToCopy2 = sizeof(float) * (((int)thisOffset + headSize + blockSize - 1) / blockSize);
+    cudaMemcpy(h_q, d_q, bytesToCopy, cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_k, d_k, bytesToCopy2, cudaMemcpyDeviceToHost);
+    std::vector<float> hqv(headSize);
+    staticDquant(h_q, hqv.data(), (int)thisOffset, headSize, 1, blockSize, typeSize, headerBytes);
+
+    //size_t pos = 0;
+    //launchDquant << <(headSize+255)/256, 256>> > (dQ, h_stage, (int)thisOffset, headSize, 1, blockSize, typeSize, headerBytes);
+    float result = 0.0f;
+    for (size_t j = 0; j < headSize; j++) {
+        result += hqv[j] * h_k[j];
+    }
+    //GOCHECK_CUDA(launchDotProductKernel(h_stage, dK, &result, headSize));
+    cudaFreeHost(h_q);
+    return result;
+}
+/*
+* q is q4 quantized, k is float array
+*/
+EXPORT float sdotSliceQ4Device(const uint64_t q, const uint64_t k, int headSize, int blockSize, int index, int typeSize, int headerBytes) {
+    uint8_t* dQ = (uint8_t*)q;
+    float* dK = (float*)k;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    float* h_stage = NULL;
+    ce = cudaMalloc((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
+    //size_t pos = 0;
+    //for (int b = index; b < (index + headSize); b++) {
+    //    h_stage[pos++] = dquant(dQ, b, 2, blockSize, typeSize, headerBytes);
+    //}
+    launchDquant << <(headSize + 255) / 256, 256 >> > (dQ, h_stage, index, headSize, 2, blockSize, typeSize, headerBytes);
+    float result = -123435.0f;
+    GOCHECK_CUDA(launchDotProductKernel(h_stage, dK, &result, headSize));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    cudaFree(h_stage);
+    return result;
+fail:
+    if (h_stage)cudaFree(h_stage);
+    return NAN;
+}
+/*
+* q is F16 quantized, k is float array
+*/
+EXPORT float sdotSliceF16Device(const uint64_t q, const uint64_t k, int headSize, int index, int typeSize) {
+    uint8_t* dQ = (uint8_t*)q;
+    float* dK = (float*)k;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    float* h_stage = NULL;
+    ce = cudaMalloc((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
+    //size_t pos = 0;
+    //for (int b = 0; b < (index + headSize); ++b) {
+    //    h_stage[pos++] = dquant(dQ, b, 3, -1, typeSize, -1);
+    //}
+    launchDquant << <(headSize + 255) / 256, 256 >> > (dQ, h_stage, index, headSize, 3, -1, typeSize, -1);
+    float result = -123435.0f;
+    GOCHECK_CUDA(launchDotProductKernel(h_stage, dK, &result, headSize));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    cudaFree(h_stage);
+    return result;
+fail:
+    if (h_stage)cudaFree(h_stage);
+    return NAN;
+}
+/*
+* q is BF16 quantized, k is float array
+*/
+EXPORT float sdotSliceBF16Device(const uint64_t q, const uint64_t k, int headSize, int index, int typeSize) {
+    uint8_t* dQ = (uint8_t*)q;
+    float* dK = (float*)k;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    float* h_stage = NULL;
+    ce = cudaMalloc((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
+    size_t pos = 0;
+    //for (int b = 0; b < (index + headSize); ++b) {
+    //    h_stage[pos++] = dquant(dQ, b, 4, -1, typeSize, -1);
+    //}
+    launchDquant << <(headSize + 255) / 256, 256 >> > (dQ, h_stage, index, headSize, 4, -1, typeSize, -1);
+    float result = -123435.0f;
+    GOCHECK_CUDA(launchDotProductKernel(h_stage, dK, &result, headSize));
+    ce = cudaGetLastError(); GOCHECK_CUDA(ce);
+    cudaFreeHost(h_stage);
+    return result;
+fail:
+    if (h_stage)cudaFreeHost(h_stage);
+    return NAN;
+}
 uint64_t cublasHandle() {
     cublasStatus_t status;
     cublasHandle_t handle = NULL;
@@ -806,21 +970,6 @@ void rmsnorm_fp32_rowmajor(const float* __restrict__ x,
         out[i] = weight[i] * (inv * x[i]);
     }
 }
-extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int blockSize, int typeSize, int headerBytes) {
-    switch (format) {
-    case 1: // Q80
-        return loadQ8(q,index,blockSize,typeSize, headerBytes);
-    case 2: // Q4
-        return loadQ4(q, index, blockSize, typeSize, headerBytes);
-    case 3: // F16
-        return loadF16(q, index, typeSize);
-    case 4:
-        return loadBF16(q, index, typeSize);
-    default:
-        return *reinterpret_cast<const float*>(q + index * blockSize);
-    }
-}
-
 extern "C" __global__
 void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
     const uint8_t* __restrict__ Kraw, // packed keys
@@ -834,8 +983,8 @@ void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
     int tid = threadIdx.x;
     int attBase = h * contextLen;
     // Phase 1: compute raw scores per timestep t
-    if (tMax == contextLen - 1) {
-        for (int t = 0; t <= tMax; ++t) {
+ 
+    for (int t = 0; t <= tMax; t++) {
             // Map this head to the correct KV slice
             int kvHead = h / kvMul;
             int kvOffset = (h % kvMul) * headSize;
@@ -843,9 +992,9 @@ void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
             // Per-thread partial dot over headSize
             float sum = 0.f;
             for (int i = tid; i < headSize; i += blockDim.x) {
-                float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);
+                //float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);
                 float q_i = Q[h * headSize + i];
-                sum += q_i * k_i;
+                //sum += q_i * k_i;
             }
             // Block reduction to a single score
             smem[tid] = sum;
@@ -856,39 +1005,13 @@ void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
             }
             if (tid == 0) {
                 Att[attBase + t] = smem[0] / sqrtHeadSize; // raw score
+                //Att[attBase + t] = 123.456f;
             }
             __syncthreads();
-        }
-    }
-    else {
-        for (int t = 0; t < contextLen; ++t) {
-            // Map this head to the correct KV slice
-            int kvHead = h / kvMul;
-            int kvOffset = (h % kvMul) * headSize;
-            int base = t * kvDim + kvHead * (kvMul * headSize) + kvOffset;
-            // Per-thread partial dot over headSize
-            float sum = 0.f;
-            for (int i = tid; i < headSize; i += blockDim.x) {
-                float k_i = dquant(Kraw, base + i, format, blockSize, typeSize, headerBytes);
-                float q_i = Q[h * headSize + i];
-                sum += q_i * k_i;
-            }
-            // Block reduction to a single score
-            smem[tid] = sum;
-            __syncthreads();
-            for (int s = blockDim.x >> 1; s > 0; s >>= 1) {
-                if (tid < s) smem[tid] += smem[tid + s];
-                __syncthreads();
-            }
-            if (tid == 0) {
-                Att[attBase + t] = smem[0] / sqrtHeadSize; // raw score
-            }
-            __syncthreads();
-        }
     }
     // Phase 2: softmax over t for this head
     // Compute max for numerical stability
-    /*
+    
     float tMaxVal = -1e20f;
     for (int t = tid; t <= tMax; t += blockDim.x) {
         tMaxVal = fmaxf(tMaxVal, Att[attBase + t]);
@@ -921,7 +1044,7 @@ void qk_scores_softmax(const float* __restrict__ Q,      // [nHeads * headSize]
     for (int t = tid; t <= tMax; t += blockDim.x) {
         Att[attBase + t] = Att[attBase + t] / denom;
     }
-    */
+    
 }
 
 extern "C" __global__
@@ -980,8 +1103,8 @@ void attention_av_weighted_sum(const float* __restrict__ attTok,       // [nHead
             // Index within the kvDim slice
             int vIndexWithinKv = kvHead * headSize + i;
             int globalElemIndex = t * kvDim + vIndexWithinKv;
-            float v_i = dquant(vCacheRaw, globalElemIndex, vIsQ8, vBlockSize, vTypeSize, vHeaderBytes);
-            acc += w * v_i;
+            //float v_i = dquant(vCacheRaw, globalElemIndex, vIsQ8, vBlockSize, vTypeSize, vHeaderBytes);
+            //acc += w * v_i;
         }
         xb[i] = acc;
     }
@@ -1036,15 +1159,14 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
     // attention scores for this head
     // float* att = s.att + h * config.seq_len;
     int attOffset = h * contextLength;
-    qk_scores_softmax << <nHeads, threads>> > (
+    qk_scores_softmax << <nHeads, threads, threads * sizeof(float) >> > (
         Q, K, S,
         nHeads, headSize, contextLength,
         kvDim, kvMul, tMaxInclusive, sqrtHeadSize,
         format, blockSize, typeSize, headerBytes);
     // Phase 2: softmax
- 
     int blocks = (nHeads + threads - 1) / threads;
-    row_softmax_inplace_fp32 << <blocks, threads >> > (S, nHeads, contextLength, contextLength);
+    //row_softmax_inplace_fp32 << <blocks, threads >> > (S, nHeads, contextLength, contextLength);
 
     NCHECK_CUDA(cudaDeviceSynchronize());
     NCHECK_CUDA(cudaGetLastError());
@@ -1052,6 +1174,11 @@ extern "C" void launch_qk_scores_fp32_rowmajor(
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
     int threads = 256;
     row_softmax_fp32 << <1, threads >> > (S, A, rows, cols, ldS, ldA);
+    cudaDeviceSynchronize();
+}
+extern "C" void launch_row_softmax_inplace_fp32(float* S, int rows, int cols, int offset) {
+    int threads = 256;
+    row_softmax_inplace_fp32 << <1, threads >> > (S, rows, cols, offset);
     cudaDeviceSynchronize();
 }
 extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, uint64_t bytes) {
@@ -1078,6 +1205,306 @@ extern "C" void cudaInit() {
     NCHECK_CUDA(cudaMemGetInfo(&freeB, &totalB));
     printf("GPU mem free=%zu total=%zu\n", freeB, totalB);
 }
+// Configuration
+#define SEQ_LENGTH 512       // Sequence length
+#define BATCH_SIZE 4         // Batch size
+#define EMBED_DIM 256        // Embedding dimension
+#define NUM_HEADS 8          // Number of attention heads
+#define HEAD_DIM (EMBED_DIM / NUM_HEADS)  // Dimension of each head
+
+// CUDA error checking macro
+#define CHECK_CUDA_ERROR(call) { \
+    cudaError_t err = call; \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error: %s, in file '%s', line %d\n", \
+                cudaGetErrorString(err), __FILE__, __LINE__); \
+        exit(EXIT_FAILURE); \
+    } \
+}
+
+// Initialize random data for query, key, value matrices
+void initializeRandomData(float* data, size_t size) {
+    for (size_t i = 0; i < size; i++) {
+        data[i] = 2.0f * (float)rand() / RAND_MAX - 1.0f; // Values between -1 and 1
+    }
+}
+
+// Utility function to print a tensor snippet
+void printTensorSnippet(const char* name, float* tensor, int rows, int cols, int stride) {
+    printf("%s (shape: %dx%d, showing top-left corner):\n", name, rows, cols);
+
+    int printRows = rows < 5 ? rows : 5;
+    int printCols = cols < 5 ? cols : 5;
+
+    for (int i = 0; i < printRows; i++) {
+        for (int j = 0; j < printCols; j++) {
+            printf("%.4f ", tensor[i * stride + j]);
+        }
+        printf("...\n");
+    }
+    printf("...\n\n");
+}
+
+// CUDA kernel for matrix multiplication: C = A * B
+// A: m x k, B: k x n, C: m x n
+__global__ void matrixMultiplyKernel(
+    float* A, float* B, float* C,
+    int m, int n, int k, int strideA, int strideB, int strideC)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < m && col < n) {
+        float sum = 0.0f;
+        for (int i = 0; i < k; i++) {
+            sum += A[row * strideA + i] * B[i * strideB + col];
+        }
+        C[row * strideC + col] = sum;
+    }
+}
+
+// CUDA kernel for matrix transpose: B = A^T
+__global__ void transposeKernel(
+    float* A, float* B, int rows, int cols, int strideA, int strideB)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < rows && col < cols) {
+        B[col * strideB + row] = A[row * strideA + col];
+    }
+}
+
+// CUDA kernel for scaling a matrix: A = A * scale
+__global__ void scaleKernel(float* A, float scale, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        A[idx] *= scale;
+    }
+}
+
+// CUDA kernel for Softmax over the last dimension
+__global__ void softmaxKernel(float* input, int rows, int cols, int stride) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < rows) {
+        // Find max value for numerical stability
+        float maxVal = -FLT_MAX;
+        for (int col = 0; col < cols; col++) {
+            maxVal = fmaxf(maxVal, input[row * stride + col]);
+        }
+
+        // Compute exponentials and sum
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {
+            input[row * stride + col] = expf(input[row * stride + col] - maxVal);
+            sum += input[row * stride + col];
+        }
+
+        // Normalize
+        for (int col = 0; col < cols; col++) {
+            input[row * stride + col] /= sum;
+        }
+    }
+}
+
+// CUDA kernel for scaled dot-product attention with mask
+__global__ void attentionKernel(
+    float* query, float* key, float* value, float* output,
+    float scale, bool useMask, int seqLen, int headDim,
+    int batchSize, int numHeads)
+{
+    extern __shared__ float scores[];
+
+    int headIdx = blockIdx.z % numHeads;
+    int batchIdx = blockIdx.z / numHeads;
+
+    int queryIdx = threadIdx.x;
+    int keyIdx = threadIdx.y;
+
+    // Each block handles attention for a specific sequence position in a specific head/batch
+    if (queryIdx < seqLen && keyIdx < seqLen) {
+        // Compute one element of the attention score matrix
+        float score = 0.0f;
+
+        // Get base index for this batch and head
+        int batchHeadOffset = (batchIdx * numHeads + headIdx) * seqLen * headDim;
+
+        // Compute dot product
+        for (int d = 0; d < headDim; d++) {
+            score += query[batchHeadOffset + queryIdx * headDim + d] *
+                key[batchHeadOffset + keyIdx * headDim + d];
+        }
+
+        // Scale
+        score *= scale;
+
+        // Apply causal mask if needed (triangle mask for autoregressive models)
+        if (useMask && keyIdx > queryIdx) {
+            score = -FLT_MAX;
+        }
+
+        // Store in shared memory
+        scores[queryIdx * seqLen + keyIdx] = score;
+    }
+
+    __syncthreads();
+
+    // Apply softmax (only for threads handling the first column of scores)
+    if (keyIdx == 0 && queryIdx < seqLen) {
+        // Find max for stability
+        float maxVal = -FLT_MAX;
+        for (int i = 0; i < seqLen; i++) {
+            maxVal = fmaxf(maxVal, scores[queryIdx * seqLen + i]);
+        }
+
+        // Compute exp and sum
+        float sum = 0.0f;
+        for (int i = 0; i < seqLen; i++) {
+            scores[queryIdx * seqLen + i] = expf(scores[queryIdx * seqLen + i] - maxVal);
+            sum += scores[queryIdx * seqLen + i];
+        }
+
+        // Normalize
+        for (int i = 0; i < seqLen; i++) {
+            scores[queryIdx * seqLen + i] /= sum;
+        }
+    }
+
+    __syncthreads();
+
+    // Apply attention weights to values (only for threads handling the first column of scores)
+    if (keyIdx == 0 && queryIdx < seqLen) {
+        int batchHeadOffset = (batchIdx * numHeads + headIdx) * seqLen * headDim;
+
+        // For each dimension in the head
+        for (int d = 0; d < headDim; d++) {
+            float weightedSum = 0.0f;
+
+            // For each key/value
+            for (int i = 0; i < seqLen; i++) {
+                weightedSum += scores[queryIdx * seqLen + i] *
+                    value[batchHeadOffset + i * headDim + d];
+            }
+
+            // Store result
+            output[batchHeadOffset + queryIdx * headDim + d] = weightedSum;
+        }
+    }
+}
+
+// Basic implementation of scaled dot-product attention
+void scalarAttention(
+    float* d_query, float* d_key, float* d_value, float* d_output,
+    int batchSize, int seqLen, int embedDim, bool useMask)
+{
+    // Temporary buffers
+    float* d_key_transposed, * d_scores;
+
+    CHECK_CUDA_ERROR(cudaMalloc(&d_key_transposed, batchSize * seqLen * embedDim * sizeof(float)));
+    CHECK_CUDA_ERROR(cudaMalloc(&d_scores, batchSize * seqLen * seqLen * sizeof(float)));
+
+    // 1. Transpose key for matrix multiplication
+    dim3 transposeBlock(16, 16);
+    dim3 transposeGrid((embedDim + transposeBlock.x - 1) / transposeBlock.x,
+        (seqLen + transposeBlock.y - 1) / transposeBlock.y);
+
+    for (int b = 0; b < batchSize; b++) {
+        transposeKernel << <transposeGrid, transposeBlock >> > (
+            d_key + b * seqLen * embedDim,
+            d_key_transposed + b * embedDim * seqLen,
+            seqLen, embedDim, embedDim, seqLen);
+    }
+
+    // 2. Compute attention scores: scores = query * key^T
+    dim3 matmulBlock(16, 16);
+    dim3 matmulGrid((seqLen + matmulBlock.x - 1) / matmulBlock.x,
+        (seqLen + matmulBlock.y - 1) / matmulBlock.y);
+
+    for (int b = 0; b < batchSize; b++) {
+        matrixMultiplyKernel << <matmulGrid, matmulBlock >> > (
+            d_query + b * seqLen * embedDim,
+            d_key_transposed + b * embedDim * seqLen,
+            d_scores + b * seqLen * seqLen,
+            seqLen, seqLen, embedDim, embedDim, seqLen, seqLen);
+    }
+
+    // 3. Scale attention scores
+    float scale = 1.0f / sqrtf(embedDim);
+    scaleKernel << <(batchSize * seqLen * seqLen + 255) / 256, 256 >> > (
+        d_scores, scale, batchSize * seqLen * seqLen);
+
+    // 4. Apply mask (optional)
+    // This would set appropriate values to -inf, but for simplicity we skip the actual implementation
+
+    // 5. Apply softmax
+    softmaxKernel << <batchSize * seqLen, 256 >> > (
+        d_scores, batchSize * seqLen, seqLen, seqLen);
+
+    // 6. Apply attention: output = scores * value
+    for (int b = 0; b < batchSize; b++) {
+        matrixMultiplyKernel << <matmulGrid, matmulBlock >> > (
+            d_scores + b * seqLen * seqLen,
+            d_value + b * seqLen * embedDim,
+            d_output + b * seqLen * embedDim,
+            seqLen, embedDim, seqLen, seqLen, embedDim, embedDim);
+    }
+
+    // Clean up
+    cudaFree(d_key_transposed);
+    cudaFree(d_scores);
+}
+
+// Optimized implementation of multi-head attention
+void multiHeadAttention(
+    float* d_query, float* d_key, float* d_value,
+    float* d_output, float* d_temp_output,
+    int batchSize, int seqLen, int embedDim, int numHeads, bool useMask)
+{
+    int headDim = embedDim / numHeads;
+
+    // We assume the input is already split into heads (for simplicity)
+
+    // Calculate attention scale
+    float scale = 1.0f / sqrtf(headDim);
+
+    // Launch optimized attention kernel
+    dim3 block(32, 32);  // Adjust based on GPU capabilities
+    dim3 grid(1, 1, batchSize * numHeads);
+
+    size_t sharedMemSize = seqLen * seqLen * sizeof(float);
+
+    attentionKernel << <grid, block, sharedMemSize >> > (
+        d_query, d_key, d_value, d_temp_output,
+        scale, useMask, seqLen, headDim, batchSize, numHeads);
+
+    // For a complete implementation, we would now need to:
+    // 1. Reshape the output to merge heads
+    // 2. Apply a final linear projection
+
+    // For simplicity, we just copy the result to the output
+    CHECK_CUDA_ERROR(cudaMemcpy(d_output, d_temp_output,
+        batchSize * seqLen * embedDim * sizeof(float),
+        cudaMemcpyDeviceToDevice));
+}
+
+// Block-sparse attention implementation (simplified)
+void blockSparseAttention(
+    float* d_query, float* d_key, float* d_value, float* d_output,
+    int batchSize, int seqLen, int embedDim, int blockSize, float sparsity)
+{
+    // In a real implementation, this would:
+    // 1. Determine which blocks to compute based on sparsity pattern
+    // 2. Only compute attention for selected blocks
+    // 3. Use specialized kernels for sparse operations
+
+    // For simplicity, we just call the standard attention
+    scalarAttention(d_query, d_key, d_value, d_output, batchSize, seqLen, embedDim, false);
+
+    // Note: A proper block-sparse implementation would significantly reduce
+    // computation and memory usage for long sequences.
+}
+
 #ifdef __cplusplus
 }
 #endif

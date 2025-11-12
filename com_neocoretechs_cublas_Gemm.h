@@ -187,6 +187,16 @@ EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
 
 EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
 
+EXPORT float sdotSliceDevice(const uint64_t, const uint64_t, uint64_t, uint64_t, int);
+
+EXPORT float sdotSliceQ8Device(const uint64_t, const uint64_t, uint64_t, uint64_t, int, int, int, int);
+
+EXPORT float sdotSliceQ4Device(const uint64_t, const uint64_t, int, int, int, int, int);
+
+EXPORT float sdotSliceF16Device(const uint64_t, const uint64_t, int, int, int);
+
+EXPORT float sdotSliceBF16Device(const uint64_t, const uint64_t, int, int, int);
+
 EXPORT uint64_t cublasHandle();
 
 EXPORT void cublasHandleDestroy(uint64_t);
@@ -222,6 +232,8 @@ EXPORT void launch_attention_av_weighted_sum(
 EXPORT void launch_qk_scores_fp32_rowmajor(const float*, const uint8_t*, float*, int, int, int, int, int, int, int, int, float, int, int, int, int);
 
 EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
+
+EXPORT void launch_row_softmax_inplace_fp32(float*, int, int, int);
 
 EXPORT void cudaInit();
 #ifdef __cplusplus
