@@ -177,25 +177,7 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jc
 
 EXPORT float sdotSliceCuBLAS(uint64_t, const float*, const float*, int);
 
-EXPORT float sdotSlice(const float*, const float*, int);
-
-EXPORT float sdotSliceQ8(const uint8_t*, const float*, int, int, int, int, int);
-
-EXPORT float sdotSliceQ4(const uint8_t*, const float*, int, int, int, int, int);
-
-EXPORT float sdotSliceF16(const uint8_t*, const float*, int, int, int);
-
-EXPORT float sdotSliceBF16(const uint8_t*, const float*, int, int, int);
-
-EXPORT float sdotSliceDevice(const uint64_t, const uint64_t, uint64_t, uint64_t, int);
-
-EXPORT float sdotSliceQ8Device(const uint64_t, const uint64_t, uint64_t, uint64_t, int, int, int, int);
-
-EXPORT float sdotSliceQ4Device(const uint64_t, const uint64_t, int, int, int, int, int);
-
-EXPORT float sdotSliceF16Device(const uint64_t, const uint64_t, int, int, int);
-
-EXPORT float sdotSliceBF16Device(const uint64_t, const uint64_t, int, int, int);
+EXPORT float sdotSliceDevice(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, float*, int);
 
 EXPORT uint64_t cublasHandle();
 
