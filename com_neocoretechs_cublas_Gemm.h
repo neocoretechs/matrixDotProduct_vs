@@ -193,7 +193,7 @@ EXPORT void copyHostToDevice(uint8_t*, uint64_t, uint64_t);
 
 EXPORT void copyDeviceToHost(uint64_t, uint8_t*, uint64_t);
 
-EXPORT void launch_rmsnorm_fp32_rowmajor(const float*, const float*, float*, int, float);
+EXPORT void launch_rmsnorm_fp32_rowmajor(uint8_t*, int, int, int, int, int, uint8_t*, int, int, int, int, int, float*, int, float);
 
 EXPORT void launch_attention_av_weighted_sum(
     const float*,       // device pointer [nHeads*contextLen]
