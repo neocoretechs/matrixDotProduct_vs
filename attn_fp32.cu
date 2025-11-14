@@ -309,8 +309,8 @@ __device__ void dotProduct(const uint8_t* qA, int indexA, int formatA, int block
     float sum = 0.0f;
     // Compute the dot product for each thread
     for (int i = threadId; i < N; i += gridDim.x * blockDim.x) {
-        sum += dquant(qA, indexA + i, formatA, blockSizeA, typeSizeA, headerBytesA) *
-            dquant(qB, indexB + i, formatB, blockSizeB, typeSizeB, headerBytesB);
+        sum += dquant(qA, indexA + (i * typeSizeA), formatA, blockSizeA, typeSizeA, headerBytesA) *
+            dquant(qB, indexB + (i * typeSizeB), formatB, blockSizeB, typeSizeB, headerBytesB);
     }
     // Store the result in shared memory
     temp[threadIdx.x] = sum;
@@ -359,46 +359,37 @@ static inline float halfToFloat(uint16_t h) {
     memcpy(&f, &f_bits, sizeof(f));
     return f;
 }
+
 extern "C" __global__
 void rmsnorm_fp32_rowmajor(const uint8_t* x, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* weight, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    float* __restrict__ out,
-    int size, float eps) {
-    // Block-wide reduction over x^2
-    float acc = 0.f;
-    for (int i = threadIdx.x; i < size; i += blockDim.x) {
-        float v = dquant(x + i, indexA, formatA, blockSizeA, typeSizeA, headerBytesA);// x[i];
-        acc += v * v;
-    }
-    // Warp reduce
-    for (int d = 16; d > 0; d >>= 1) acc += __shfl_down_sync(0xffffffff, acc, d);
-
-    // Shared reduction across warps
-    __shared__ float warpSum[32]; // supports up to 1024 threads
-    int lane = threadIdx.x & 31;
-    int wid = threadIdx.x >> 5;
-    if (lane == 0) warpSum[wid] = acc;
-    __syncthreads();
-
-    float sumsq = 0.f;
-    if (threadIdx.x < (blockDim.x >> 5)) sumsq = warpSum[threadIdx.x];
-    __syncthreads();
-
-    // Final fold by thread 0
-    if (threadIdx.x == 0) {
-        for (int w = 1; w < (blockDim.x >> 5); ++w) sumsq += warpSum[w];
-        float inv = rsqrtf(sumsq / size + eps);
-        // Write inv to shared for broadcast
-        warpSum[0] = inv;
-    }
-    __syncthreads();
-    float inv = warpSum[0];
-
-    // Normalize and scale
-    for (int i = threadIdx.x; i < size; i += blockDim.x) {
-        out[i] = dquant(weight + i, indexB, formatB, blockSizeB, typeSizeB, headerBytesB) * /*weight[i] * (inv * x[i]);*/
-            (inv * dquant(x + i, indexA, formatA, blockSizeA, typeSizeA, headerBytesA));
-    }
+    uint8_t* out, int size, float eps) {
+        // Shared buffer for reduction
+        __shared__ float partial[256];  // assuming <=256 threads
+        float acc = 0.f;
+        // Each thread accumulates its slice
+        for (int i = threadIdx.x; i < size; i += blockDim.x) {
+            float v = dquant(x + (i*typeSizeA), indexA, formatA, blockSizeA, typeSizeA, headerBytesA);// x[i];//x[i];
+            acc += v * v;
+        }
+        partial[threadIdx.x] = acc;
+        __syncthreads();
+        // Simple reduction by thread 0
+        if (threadIdx.x == 0) {
+            float sumsq = 0.f;
+            for (int t = 0; t < blockDim.x; ++t) sumsq += partial[t];
+            float inv = rsqrtf(sumsq / size + eps);
+            partial[0] = inv; // broadcast
+        }
+        __syncthreads();
+        float inv = partial[0];
+        // Normalize and scale
+        for (int i = threadIdx.x; i < size; i += blockDim.x) {
+           // printf("i = %d ) weight=%f x=%f * inv=%f\n", i, dquant(weight+(i * typeSizeB), indexB, formatB, blockSizeB, typeSizeB, headerBytesB), 
+                //dquant(x + (i * typeSizeA), indexA, formatA, blockSizeA, typeSizeA, headerBytesA), inv);
+            reinterpret_cast<float*>(out)[i] = dquant(weight + (i*typeSizeB), indexB, formatB, blockSizeB, typeSizeB, headerBytesB) /*weight[i]*/ *
+                (inv * dquant(x + (i*typeSizeA), indexA, formatA, blockSizeA, typeSizeA, headerBytesA));// (inv * x[i]);
+        }
 }
 // CPU conversion for Q8_0
 std::vector<float> convertQ8ToFloat(const uint8_t* input, size_t len, int blockSize = 32, int headerBytes = 2) {
@@ -863,14 +854,27 @@ int cudaGetMemInfo(size_t* free, size_t* total) {
 */
 extern "C" void launch_rmsnorm_fp32_rowmajor(uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    float* out, int size, float eps) {
+    uint8_t* out, int size, float eps) {
     // One block is enough for vector sizes up to a few thousand; tune if needed
+    //printf("rmsnorm %p %p %p %d %d %d %d %d %d %d %d %d %d\n", (void*)qA, (void*)qB, (void*)out, indexA, formatA, blockSizeA, typeSizeA, headerBytesA, indexB, formatB, blockSizeB, typeSizeB, headerBytesB);
     int threads = 256;
-    rmsnorm_fp32_rowmajor << <1, threads >> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+    int blocks = (size + threads - 1) / threads;
+    rmsnorm_fp32_rowmajor << <blocks, threads >> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
         out, size, eps);
     NCHECK_CUDA(cudaGetLastError());
     cudaDeviceSynchronize();
+    // Host buffer to read back results
+    /*float* host = (float*)malloc(size * sizeof(float));
+    if (!host) { printf("malloc failed\n"); return; }
+    // Copy device -> host
+    NCHECK_CUDA( cudaMemcpy(host, reinterpret_cast<float*>(out), size * sizeof(float), cudaMemcpyDeviceToHost));
+    // Print a few sentinels (avoid giant logs)
+    //printf("out[0]=%f out[mid]=%f out[last]=%f\n", host[0], host[size / 2], host[size - 1]);
+    for (int i = 0; i < size; ++i) {
+        printf("i=%d val=%f\n", i, host[i]);
+    }
+    free(host);*/
 }
 /*
 * Java loop
@@ -941,7 +945,8 @@ extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, uint64_t by
     NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyHostToDevice));
 }
 extern "C" void copyDeviceToHost(uint64_t d_tensor, uint8_t* tensor, uint64_t bytes) {
-    NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyDeviceToHost));
+    // dst = host buffer (tensor), src = device buffer (d_tensor)
+    NCHECK_CUDA(cudaMemcpy(tensor, (void*)d_tensor, bytes, cudaMemcpyDeviceToHost));
 }
 extern "C" uint64_t allocDevicePtr(uint64_t bytes) {
     uint8_t* d_tensor = nullptr;
