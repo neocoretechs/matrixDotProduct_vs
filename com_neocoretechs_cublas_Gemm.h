@@ -205,15 +205,6 @@ EXPORT void copyDeviceToHost(uint64_t, uint8_t*, uint64_t);
 
 EXPORT void launch_rmsnorm_fp32_rowmajor(uint8_t*, int, int, int, int, int, uint8_t*, int, int, int, int, int, uint8_t*, int, float);
 
-EXPORT void launch_attention_av_weighted_sum(
-    const float*,       // device pointer [nHeads*contextLen]
-    const uint8_t*,  // device pointer [contextLen*kvTypeSizeTotal]
-    float*,              // device pointer [nHeads*headSize]
-    int, int, int, int, int, int, int, int, int,
-    int,                 // 1=Q8, 2=Q4, 3=F16, 4=BF16, 5=F32
-    int   // default launch config thread per block
-);
-
 EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 
 EXPORT void launch_row_softmax_inplace_fp32(float*, int, int, int);

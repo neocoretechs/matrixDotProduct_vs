@@ -69,68 +69,7 @@ __global__ void row_softmax_inplace_fp32(float* __restrict__ S,
     for (int c = 0; c < cols; ++c) srow[c] *= inv;
 }
 
-extern "C" __global__
-void av_weighted_sum_fp32_rowmajor(
-    const float* __restrict__ A,       // [nHeads * contextLength] attention weights
-    const float* __restrict__ Vcache,  // global V cache, row-major
-    float* __restrict__ Xb,            // [nHeads * headSize] output for this token
-    int nHeads,
-    int headSize,
-    int contextLength,
-    int kvDim,
-    int kvMul,
-    int tMaxInclusive,
-    size_t layerBaseOffset
-) {
-    int h = blockIdx.x;                          // head
-    int i = blockIdx.y * blockDim.x + threadIdx.x; // element in head vector
-    if (h >= nHeads || i >= headSize) return;
 
-    const float* a_h = A + h * contextLength;
-    float* xb_h = Xb + h * headSize;
-
-    float acc = 0.f;
-    // layerBaseOffset must be in “elements” (not bytes). 
-    // If it’s bytes, convert: reinterpret_cast<const float*>((const char*)Vcache + layerBaseOffset).
-#pragma unroll 4
-    for (int t = 0; t <= tMaxInclusive; ++t) {
-        const float* v_th = Vcache + layerBaseOffset + t * kvDim + (h / kvMul) * headSize;
-        acc += a_h[t] * v_th[i];
-    }
-    xb_h[i] = acc;
-}
-extern "C" __global__
-void attention_av_weighted_sum(const float* __restrict__ attTok,       // [nHeads*contextLen]
-    const uint8_t* __restrict__ vCacheRaw,  // quantized/raw bytes for V: [contextLen*kvTypeSizeTotal]
-    float* __restrict__ xbTok,              // [nHeads*headSize]
-    int nHeads, int headSize, int kvDim, int kvMul, int contextLen, int tMax,
-    // Quantization params for V (match your FloatVector format):
-    int vBlockSize,      // elements per quant block
-    int vTypeSize,       // bytes per block (header + payload)
-    int vHeaderBytes,    // bytes before payload
-    int vIsQ8         // 1 if q8, 0 otherwise
-) {
-    int h = blockIdx.x;
-    if (h >= nHeads) return;
-    int tid = threadIdx.x;
-    int stride = blockDim.x;
-    const int kvHead = h / kvMul;
-    const int attBase = h * contextLen;
-    float* xb = xbTok + h * headSize;
-    for (int i = tid; i < headSize; i += stride) {
-        float acc = 0.f;
-        // Loop over timesteps and accumulate weighted V[i]
-        for (int t = 0; t <= tMax; ++t) {
-            float w = attTok[attBase + t];
-            // Index within the kvDim slice
-            int vIndexWithinKv = kvHead * headSize + i;
-            int globalElemIndex = t * kvDim + vIndexWithinKv;
-            //float v_i = dquant(vCacheRaw, globalElemIndex, vIsQ8, vBlockSize, vTypeSize, vHeaderBytes);
-            //acc += w * v_i;
-        }
-        xb[i] = acc;
-    }
-}
 __device__ inline float getFloatDevice(const float* d_q, int index) {
     //const float* d_q = reinterpret_cast<const float*>(q);
     return *(d_q + index);
@@ -754,32 +693,6 @@ extern "C" void launch_rmsnorm_fp32_rowmajor(uint8_t* qA, int indexA, int format
         printf("i=%d val=%f\n", i, host[i]);
     }
     free(host);*/
-}
-/*
-* Java loop
-*for (t) {
-*  float a = att[h,t];
-*  for (i) xb[h,i] += a * v[t,h,i];
-*}
-* CUDA kernel
-*for (i in parallel) {
-*  float acc = 0;
-*  for (t) acc += att[h,t] * v[t,h,i];
-*  xb[h,i] = acc;
-*}
-*/
-extern "C" void launch_attention_av_weighted_sum(
-    const float* d_attTok,       // device pointer [nHeads*contextLen]
-    const uint8_t* d_vCacheRaw,  // device pointer [contextLen*kvTypeSizeTotal]
-    float* d_xbTok,              // device pointer [nHeads*headSize]
-    int nHeads, int headSize, int kvDim, int kvMul, int contextLen,int tMax, int vBlockSize,int vTypeSize, int vHeaderBytes,
-    int vFormat,                 // 1=Q8, 2=Q4, 3=F16, 4=BF16, 5=F32
-    int threadsPerBlock = 128    // default launch config
-) {
-    dim3 grid(nHeads);
-    dim3 block(threadsPerBlock);
-    attention_av_weighted_sum << <grid, block >> > ( d_attTok, d_vCacheRaw, d_xbTok, nHeads, headSize, kvDim, kvMul, contextLen, tMax, vBlockSize, vTypeSize, vHeaderBytes, vFormat);
-    cudaDeviceSynchronize();
 }
 
 extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
