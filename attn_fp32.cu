@@ -190,11 +190,41 @@ __device__ void dotProduct(const uint8_t* __restrict__ qA, int indexA, int forma
         atomicAdd(result, temp[0]);
     }
 }
-extern "C" __global__ void matmul(const uint8_t* thiz, int dim0, int formatA, int blockSizeA, int typeSizeA, int headerBytesA, 
-    const uint8_t* that, int dim1, int formatB, int blockSizeB, int typeSizeB, int headerBytesB, uint8_t* out, int size) {
-    //Parallel.parallelFor(0, indexA, i->out.setFloat(i
+
+/*
+* int threads = 256;
+* int blocks = (size + threads - 1) / threads;
+* Att = state.att[token], xb = state.xb[token], vCache = state.valueCache[curLayer]
+* size = position + token
+*/
+extern "C" __global__ void weighted_sum(uint8_t* Att, uint8_t* xb, const uint8_t* vCache, int h, int headSize, int attOffset, int xbOffset, int kvDim, int kvMul, int size) {
+    float* attF = reinterpret_cast<float*>(Att);
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t < size) {
+        int vOffset = t * kvDim + (h / kvMul) * headSize;
+        // get the attention weight for this timestep
+        float a = attF[attOffset + t];
+        // accumulate the weighted value into xb
+        printf("into saxpy:%d %d %p %d %p %d %d %f\n", t, size, xb, xbOffset, vCache, vOffset, headSize, a);
+        float* thizF = reinterpret_cast<float*>(Att);
+        const float* thatF = reinterpret_cast<const float*>(vCache);
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        printf("saxpy0: %p %p %d %d\n", thizF, thatF, attOffset, i);
+        // saxpy in place
+        if (i < size) {
+            thizF[attOffset + i] =
+                a * thatF[xbOffset + i] + thizF[attOffset + i];
+            printf("saxpy: %f\n", thizF[attOffset + i]);
+        }
+    }
+}
+extern "C" __global__ void matmul(const uint8_t* thiz, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA, 
+    const uint8_t* that, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB, uint8_t* out, int dim0, int dim1) {
+    //void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
+    //    Parallel.parallelFor(0, dim0, i->out.setFloat(i, dot(i * dim1, that, 0, dim1)));
+    //}
     float result;
-    for (int i = threadIdx.x; i < size; i += gridDim.x * blockDim.x) {
+    for (int i = threadIdx.x; i < dim0; i += gridDim.x * blockDim.x) {
         dotProduct(thiz, i * dim1, formatA, blockSizeA, typeSizeA, headerBytesA,
             that, 0, formatB, blockSizeB, typeSizeB, headerBytesB, &result, dim1);
         reinterpret_cast<float*>(out)[i] = result;
@@ -466,83 +496,57 @@ cudaError_t launchDotProductKernel(const uint8_t* qA, int indexA, int formatA, i
         cudaFree(d_result);
         return ce;
 }
-EXPORT void launchMatmulKernel(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+EXPORT void launch_Matmul(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    uint8_t* out, int N) {
+    uint8_t* out, int dim0, int dim1) {
     int blockSize = 256;
-    int numBlocks = (N + blockSize - 1) / blockSize;
+    int numBlocks = (dim0 + blockSize - 1) / blockSize;
+    //void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
+    //    Parallel.parallelFor(0, dim0, i->out.setFloat(i, dot(i * dim1, that, 0, dim1)));
+    //}
     matmul << <numBlocks, blockSize>> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
-        out, N);
+        out, dim0, dim1);
     NCHECK_CUDA(cudaGetLastError());
 }
-// Each block computes the dot for a single timestep t using parallel dotProduct.
-// All pointers are uint8_t*; offsets are BYTES.
+
 __global__ void qk_scores_grid(
-    const uint8_t* __restrict__ Q, int qOffsetBytes,
+    const uint8_t* __restrict__ Q, int qOffset,
     int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
-    const uint8_t* __restrict__ keyCache,
+    const uint8_t* __restrict__ keyCache, int keyCacheOffset,
     int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    uint8_t* __restrict__ Att, size_t attOffsetBytes,
-    int h, int headSize, int kvDim, int kvMul, float sqrtHeadSize,
-    int t0, int tCount // process timesteps [t0, t0 + tCount)
-) {
-    int t = t0 + blockIdx.x;
-    if (t >= t0 + tCount) return;
+    uint8_t* __restrict__ Att, int attOffset,
+    int h, int headSize, int kvDim, int kvMul, int t, float sqrtHeadSize) {
+    float out;
+    //printf("qk_scores_grid0 keyCacheOffset=%d qOffset=%d  attOffset=%d for t=%d Q=%f Kc=%f Att=%f\n", keyCacheOffset, qOffset, attOffset, t,
+    //dquant(Q, qOffset, formatA, blockSizeA, typeSizeA, headerBytesA),
+    //    dquant(keyCache, keyCacheOffset, formatB, blockSizeB, typeSizeB, headerBytesB),
+    //    dquant(Att, attOffset, formatB, blockSizeB, typeSizeB, headerBytesB));
 
-    // Compute key index in ELEMENTS, then convert to BYTES with typeSizeB.
-    int keyIndex = t * kvDim + (h / kvMul) * headSize;
-    size_t keyCacheOffsetBytes = (size_t)keyIndex * (size_t)typeSizeB;
-
-    // Device float accumulator for this block's result
-    __shared__ float scoreBlock;
-
-    // Let dotProduct write directly to scoreBlock (address visible to device)
-    float* out = &scoreBlock;
-
-    // Ensure blockDim.x == 256 to match your helper's shared memory expectations
-    dotProduct(Q, qOffsetBytes, formatA, blockSizeA, typeSizeA, headerBytesA,
-        keyCache, (int)keyCacheOffsetBytes, formatB, blockSizeB, typeSizeB, headerBytesB,
-        out, headSize);
-
-    // Use one thread to store the final score scaled into Att as bytes
-    if (threadIdx.x == 0) {
-        float score = scoreBlock / sqrtHeadSize;
-        size_t writeOffset = attOffsetBytes + (size_t)(t - t0) * sizeof(float);
-        *reinterpret_cast<float*>(Att + writeOffset) = score; // 4-byte alignment assumed
-    }
+    dotProduct(Q, qOffset, formatA, blockSizeA, typeSizeA, headerBytesA,
+       keyCache, keyCacheOffset, formatB, blockSizeB, typeSizeB, headerBytesB,
+        &out, headSize);
+    printf("qk_scores_grid1=%f for t=%d\n", out, t);
+    float score = out / sqrtHeadSize;
+    reinterpret_cast<float*>(Att)[attOffset + t] = score; // 4-byte alignment assumed
+    printf("qk_scores_grid2=%f for t=%d\n", reinterpret_cast<float*>(Att)[attOffset + t], t);
 }
-EXPORT void launch_qk_scores_grid(
-    const uint8_t* Q, int qOffsetBytes,
-    int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
-    const uint8_t* keyCache,
-    int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
-    uint8_t* Att, int attOffset,
-    int h, int headSize, int kvDim, int kvMul,
-    int token, int position, float sqrtHeadSize
-) {
-    int tCount = position + token + 1;              // number of timesteps to score
-    dim3 grid(tCount);                              // one block per t
-    dim3 block(256);                                // matches dotProduct helper
 
-    qk_scores_grid << <grid, block >> > (
-        Q, qOffsetBytes, formatA, blockSizeA, typeSizeA, headerBytesA,
-        keyCache, formatB, blockSizeB, typeSizeB, headerBytesB,
-        Att, (size_t)attOffset,
-        h, headSize, kvDim, kvMul, sqrtHeadSize,
-        /*t0*/ 0, tCount
-        );
-    NCHECK_CUDA(cudaDeviceSynchronize());
-    NCHECK_CUDA(cudaGetLastError());
-    // softmax the scores to get attention weights, from 0..position inclusively
-    //state.att[token].softmaxInPlace(attOffset, position + token + 1);
-    // weighted sum of the values, store back into xb
+/*
+* int threads = 256;
+* int blocks = (size + threads - 1) / threads;
+* Att = state.att[token], xb = state.xb[token], vCache = state.valueCache[curLayer]
+* size = position + token
+*/
+EXPORT void launch_weighted_sum(uint8_t* Att, uint8_t* xb, const uint8_t* vCache, int h, int headSize, int attOffset, int xbOffset, int kvDim, int kvMul, int size) {
+    //state.xb[token].fillInPlace(xbOffset, headSize, 0f);
     int threads = 256;
-    row_softmax_inplace_fp32 << <1, threads >> > ((float*)Att, (position + token + 1)* sizeof(float), 1, (attOffset * sizeof(float)));
+    int blocks = (size + threads - 1) / threads;
+    //printf("%p %p %p %d %d %d %d %d %d %d\n", Att, xb, vCache, h, headSize, attOffset, xbOffset, kvDim, kvMul, size);
+    weighted_sum << <blocks, threads >> > (Att, xb, vCache, h, headSize, attOffset, xbOffset, kvDim, kvMul, size);
     cudaDeviceSynchronize();
     NCHECK_CUDA(cudaGetLastError());
 }
-
 EXPORT float sdotSliceCuBLAS(uint64_t handle, const float* q, const float* k, int headSize) {
     float* dQ = NULL, * dK = NULL;
     size_t bytes = (size_t)headSize * sizeof(float);

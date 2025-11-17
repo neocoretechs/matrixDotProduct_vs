@@ -179,15 +179,7 @@ EXPORT float sdotSliceCuBLAS(uint64_t, const float*, const float*, int);
 
 EXPORT float sdotSliceDevice(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, int);
 
-EXPORT void launchMatmulKernel(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, uint8_t*, int);
-
-EXPORT void launch_qk_scores_grid(const uint8_t*, // state.q[token] - query offset is qOffset
-    int, int, int, int, int,
-    const uint8_t*, // state.keyCache[curLayer] - key cache offset is keyCacheOffset
-    int, int, int, int,
-    uint8_t*,        // state.att[token] (outputs softmax weights) float format
-    int, int, int, int, int, int, int, float);
-
+EXPORT void launch_Matmul(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, uint8_t*, int, int);
 
 EXPORT uint64_t cublasHandle();
 
@@ -196,8 +188,6 @@ EXPORT void cublasHandleDestroy(uint64_t);
 EXPORT int cudaGetMemInfo(size_t*, size_t*);
 
 EXPORT uint64_t allocDevicePtr(uint64_t bytes);
-
-EXPORT void freeDevicePtr(uint64_t d_tensor);
 
 EXPORT void copyHostToDevice(uint8_t*, uint64_t, uint64_t);
 
@@ -209,7 +199,11 @@ EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 
 EXPORT void launch_row_softmax_inplace_fp32(float*, int, int, int);
 
+EXPORT void launch_weighted_sum(uint8_t*, uint8_t*, const uint8_t*, int, int, int, int, int, int, int);
+
 EXPORT void cudaInit();
+
+EXPORT void freeDevicePtr(uint64_t);
 #ifdef __cplusplus
 }
 #endif
