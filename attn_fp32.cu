@@ -508,6 +508,7 @@ EXPORT void launch_Matmul(const uint8_t* qA, int indexA, int formatA, int blockS
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
         out, dim0, dim1);
     NCHECK_CUDA(cudaGetLastError());
+    cudaDeviceSynchronize();
 }
 
 __global__ void qk_scores_grid(
