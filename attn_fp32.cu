@@ -166,7 +166,7 @@ __device__ void dotProduct(const uint8_t* __restrict__ qA, int indexA, int forma
     const uint8_t* __restrict__ qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
     float* result, int N) {
     // Shared memory for accumulating partial results
-    __shared__ float temp[256];
+    __shared__ float temp[64];
     int threadId = threadIdx.x + blockIdx.x * blockDim.x;
     float sum = 0.0f;
     // Compute the dot product for each thread
@@ -188,6 +188,34 @@ __device__ void dotProduct(const uint8_t* __restrict__ qA, int indexA, int forma
     // Write the block result to the global result array
     if (threadIdx.x == 0) {
         atomicAdd(result, temp[0]);
+    }
+}
+__global__ void simpleDotProduct(
+    const uint8_t * __restrict__ qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+    const uint8_t * __restrict__ qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
+    float* __restrict__ result, int N) {
+    float sum = 0.0f;
+    for (int i = 0; i < N; ++i) {
+        float Aval = dquant(qA, indexA + i, formatA, blockSizeA, typeSizeA, headerBytesA);
+        float Bval = dquant(qB, indexB + i, formatB, blockSizeB, typeSizeB, headerBytesB);                                      
+    }
+    *result = sum;
+}
+// Kernel function for inner-product-based matrix multiplication
+__global__ void innerProductKernel(const uint8_t* __restrict__ A, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+    const uint8_t* __restrict__ B, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
+    float* C, int dim0, int dim1) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y; // rows use y
+    printf("kernel row=%d dim0=%d\n", row, dim0);
+    if (row < dim0) {
+        float sum = 0.0f;
+        for (int k = 0; k < dim1; ++k) {
+            float Aval = dquant(A, indexA + row * dim1 + k, formatA, blockSizeA, typeSizeA, headerBytesA);
+            float Bval = dquant(B, indexB + k, formatB, blockSizeB, typeSizeB, headerBytesB);
+            sum += Aval * Bval;
+        }
+        C[row] = sum;
+        printf("kernel row=%d sum=%f\n",row, C[row]);
     }
 }
 
@@ -224,9 +252,12 @@ extern "C" __global__ void matmul(const uint8_t* thiz, int indexA, int formatA, 
     //    Parallel.parallelFor(0, dim0, i->out.setFloat(i, dot(i * dim1, that, 0, dim1)));
     //}
     float result;
+    printf("ThreadIdx.x=%d dim0=%d gridDim.x=%d blockDim.x=%d gridDim.x*blockDim.x=%d\n", threadIdx.x, dim0, gridDim.x, blockDim.x, (gridDim.x * blockDim.x));
     for (int i = threadIdx.x; i < dim0; i += gridDim.x * blockDim.x) {
+        printf("out=%p [%d]\n", out, i);
         dotProduct(thiz, i * dim1, formatA, blockSizeA, typeSizeA, headerBytesA,
             that, 0, formatB, blockSizeB, typeSizeB, headerBytesB, &result, dim1);
+        printf("out=%p [%d] = %f\n", out, i, result);
         reinterpret_cast<float*>(out)[i] = result;
     }
 }
@@ -481,7 +512,7 @@ cudaError_t launchDotProductKernel(const uint8_t* qA, int indexA, int formatA, i
         cudaError_t ce = cudaMalloc((void**)&d_result, sizeof(float));
         if (ce) return ce;
         ce = cudaMemset(d_result, 0, sizeof(float));
-        int blockSize = 256;
+        int blockSize = 64;
         int numBlocks = (N + blockSize - 1) / blockSize;
         dotProductSetup << <numBlocks, blockSize>> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
             qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
@@ -499,15 +530,43 @@ cudaError_t launchDotProductKernel(const uint8_t* qA, int indexA, int formatA, i
 EXPORT void launch_Matmul(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
     uint8_t* out, int dim0, int dim1) {
-    int blockSize = 256;
-    int numBlocks = (dim0 + blockSize - 1) / blockSize;
+    //float* qC = reinterpret_cast<float*>(out); // device pointer to output
+    // Define the number of threads per block and the number of blocks per grid
+    // dim0 M rows dim1 K shared dimension N is columns, now = 1
+    // 2-D launch, rows mapped to y
+    int N = 1;
+    dim3 threadsPerBlock(16, 16);
+    dim3 blocksPerGrid(N, (dim0 + threadsPerBlock.y - 1) / threadsPerBlock.y); // N=1 => x=1
+
+    // Launch the kernel
+    innerProductKernel << <blocksPerGrid, threadsPerBlock >> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+        qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB, (float*)out, dim0, dim1);
+    // Check for errors in kernel launch
+    NCHECK_CUDA(cudaGetLastError());
+    // Copy the resultant matrix C from device to host
+    float* h_stage = nullptr;
+    cudaError_t ce = cudaHostAlloc((void**)&h_stage, dim0*sizeof(float), cudaHostAllocDefault);
+    cudaMemcpy(h_stage, out, dim0*sizeof(float), cudaMemcpyDeviceToHost);
+    for(int i = 0; i < dim0; i++)
+        printf("dim0=%d i=%d out=%f\n", dim0, i, h_stage[i]);
+    cudaFreeHost(h_stage);
     //void matmul(FloatTensor that, FloatTensor out, int dim0, int dim1) {
     //    Parallel.parallelFor(0, dim0, i->out.setFloat(i, dot(i * dim1, that, 0, dim1)));
     //}
-    matmul << <numBlocks, blockSize>> > (qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
-        qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
-        out, dim0, dim1);
-    NCHECK_CUDA(cudaGetLastError());
+    //for (int i = 0; i < dim0; i++) {
+    //    float result;
+     //   NCHECK_CUDA(launchDotProductKernel(qA, i * dim1, formatA, blockSizeA, typeSizeA, headerBytesA,
+     //       qB, 0, formatB, blockSizeB, typeSizeB, headerBytesB, &result, dim1));
+        //printf("Result=%f\n",result);
+        // Write the host result into device out[i]
+   //     cudaError_t ce = cudaMemcpy(d_out + i, &result, sizeof(float), cudaMemcpyHostToDevice);
+     //   if (ce) { NCHECK_CUDA(ce); return; }
+    //}
+    //matmul << <numBlocks, blockSize>> >(qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+    //    qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
+    //    out, dim0, dim1);
+    
+    //NCHECK_CUDA(cudaGetLastError());
     cudaDeviceSynchronize();
 }
 
@@ -568,35 +627,45 @@ fail:
     return NAN;
 }
 /*
+* Does simple dquant and scalar dot, return result to testing/verification
 * q and k are device addresses cast to float, we have to move them down
 */
-static float scalarDot(const float* d_q, const float* d_k,
-    size_t thisOffset, size_t thatOffset, size_t size) {
-    float* h_q = nullptr;
-    float* h_k = nullptr;
-    float result = 0.0f;
-    cudaError_t ce = cudaMallocHost(&h_q, size * sizeof(float));
-    if (ce != cudaSuccess) return 0.0f;
-    ce = cudaMallocHost(&h_k, size * sizeof(float));
-    if (ce != cudaSuccess) { cudaFreeHost(h_q); return 0.0f; }
-    cudaMemcpy(h_q, d_q + thisOffset, size * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_k, d_k + thatOffset, size * sizeof(float), cudaMemcpyDeviceToHost);
-    for (size_t j = 0; j < size; ++j) {
-        result += h_q[j] * h_k[j];
-    }
-    cudaFreeHost(h_q);
-    cudaFreeHost(h_k);
-    return result;
+EXPORT float launch_cpu_scalar_Dot(const uint8_t* d_q, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+    const uint8_t* d_k, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB, int size) {
+        float result_host = 0.0f;
+        float* d_result = nullptr;
+        NCHECK_CUDA(cudaMalloc(&d_result, sizeof(float)));
+        NCHECK_CUDA(cudaMemset(d_result, 0, sizeof(float)));
+        simpleDotProduct << <1, 1 >> > (
+            d_q, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
+            d_k, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
+            d_result, size
+            );
+        NCHECK_CUDA(cudaGetLastError());
+        NCHECK_CUDA(cudaDeviceSynchronize());
+        NCHECK_CUDA(cudaMemcpy(&result_host, d_result, sizeof(float), cudaMemcpyDeviceToHost));
+        NCHECK_CUDA(cudaFree(d_result));
+        //printf("simpleDot d_q=%p d_k=%p result=%f for %d elements.\n", d_q, d_k, result_host, size);
+        return result_host;
+    //float* h_q = nullptr;
+    //float* h_k = nullptr;
+    //cudaError_t ce = cudaMallocHost(&h_q, size * sizeof(float));
+    //if (ce != cudaSuccess) return 0.0f;
+    //ce = cudaMallocHost(&h_k, size * sizeof(float));
+    //if (ce != cudaSuccess) { cudaFreeHost(h_q); return 0.0f; }
+    //cudaMemcpy(h_q, d_q + indexA, size * sizeof(float), cudaMemcpyDeviceToHost);
+    //cudaMemcpy(h_k, d_k + indexB, size * sizeof(float), cudaMemcpyDeviceToHost);
+    //cudaFreeHost(h_q);
+    //cudaFreeHost(h_k);
 }
 
-EXPORT float getFloat(const uint64_t q, int index, int blockSize, int typeSize, int headerBytes) {
+EXPORT float getFloat(const uint64_t q, int index) {
     const float* d_q = reinterpret_cast<const float*>(q);
     float value = 0.0f;
     NCHECK_CUDA(cudaMemcpy(&value, d_q + index, sizeof(float), cudaMemcpyDeviceToHost));
-    NCHECK_CUDA(cudaDeviceSynchronize());
     return value;
 }
-EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize, int headerBytes) {
+/*EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize, int headerBytes) {
     const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
     uint8_t* h_q = nullptr;
     uint16_t* s_q = nullptr;
@@ -615,6 +684,26 @@ EXPORT float getFloatQ8(const uint64_t q, int index, int blockSize, int typeSize
     NCHECK_CUDA(cudaFreeHost(s_q));
     //printf("GPU index=%d quant=%d scale=%f\n",index, quant, scale);
     return ((float)quant) * scale;
+}*/
+EXPORT float getFloatQ8(const uint64_t q, int index,
+    int blockSize, int typeSize, int headerBytes) {
+    const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
+    int blockIndex = index / blockSize;
+    int withinBlockIndex = index % blockSize;
+    int blockOffset = blockIndex * typeSize;
+    uint8_t h_quant;
+    uint16_t h_scale;
+    // read quantized byte
+    NCHECK_CUDA(cudaMemcpy(&h_quant,
+        d_q + blockOffset + headerBytes + withinBlockIndex,
+        sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    // read scale (stored as half at start of block)
+    NCHECK_CUDA(cudaMemcpy(&h_scale,
+        d_q + blockOffset,
+        sizeof(uint16_t), cudaMemcpyDeviceToHost));
+    int8_t quant = static_cast<int8_t>(h_quant);
+    float scale = halfToFloat(h_scale);
+    return static_cast<float>(quant) * scale;
 }
 /*
 * Scalar dot routines working on quantized device buffers

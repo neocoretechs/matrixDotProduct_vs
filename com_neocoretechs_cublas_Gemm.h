@@ -177,6 +177,10 @@ JNIEXPORT jfloat JNICALL Java_com_neocoretechs_cublas_Gemm_sdotSlice(JNIEnv*, jc
 
 EXPORT float sdotSliceCuBLAS(uint64_t, const float*, const float*, int);
 
+EXPORT float getFloat(const uint64_t, int);
+
+EXPORT float getFloatQ8(const uint64_t, int, int, int, int);
+
 EXPORT float sdotSliceDevice(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, int);
 
 EXPORT void launch_Matmul(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, uint8_t*, int, int);
@@ -200,6 +204,8 @@ EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 EXPORT void launch_row_softmax_inplace_fp32(float*, int, int, int);
 
 EXPORT void launch_weighted_sum(uint8_t*, uint8_t*, const uint8_t*, int, int, int, int, int, int, int);
+
+EXPORT float launch_cpu_scalar_Dot(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, int);
 
 EXPORT void cudaInit();
 
