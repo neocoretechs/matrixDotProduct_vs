@@ -161,7 +161,9 @@ extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int 
     default: return reinterpret_cast<const float*>(q)[index];
     }
 }
-
+/*
+* 64 thread shared temp
+*/
 __device__ void dotProduct(const uint8_t* __restrict__ qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* __restrict__ qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
     float* result, int N) {
@@ -194,10 +196,16 @@ __global__ void simpleDotProduct(
     const uint8_t * __restrict__ qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t * __restrict__ qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
     float* __restrict__ result, int N) {
+    //float result = 0f;
+    //for (int j = 0; j < size; j++) {
+    //    result += thiz.getFloat(thisOffset + j) * that.getFloat(thatOffset + j);
+    //}
+    //return result;
     float sum = 0.0f;
     for (int i = 0; i < N; ++i) {
         float Aval = dquant(qA, indexA + i, formatA, blockSizeA, typeSizeA, headerBytesA);
-        float Bval = dquant(qB, indexB + i, formatB, blockSizeB, typeSizeB, headerBytesB);                                      
+        float Bval = dquant(qB, indexB + i, formatB, blockSizeB, typeSizeB, headerBytesB);  
+        sum += Aval * Bval;
     }
     *result = sum;
 }
@@ -579,16 +587,16 @@ EXPORT void launch_Matmul(const uint8_t* qA, int indexA, int formatA, int blockS
     cudaDeviceSynchronize();
 }
 /*
-* 		for (int t = 0; t <= position + token; t++) {
-*    			//	// get the key vector for this head and at this timestep
-*    				// float* k = s.key_cache + loff + t * dim + h * headSize;
-*    				int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
-*    				// calculate the attention score as the dot product of q and k
-*    				float score = state.q[token].dot(qOffset, state.keyCache[curLayer], keyCacheOffset, headSize);
-*    				score /= sqrtHeadSize;
-*    				// save the score to the attention buffer
-*    				state.att[token].setFloat(attOffset + t, score);
-*   			}
+* 	for (int t = 0; t <= position + token; t++) {
+*    	// get the key vector for this head and at this timestep
+*    	// float* k = s.key_cache + loff + t * dim + h * headSize;
+*    	int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
+*    	// calculate the attention score as the dot product of q and k
+*    	float score = state.q[token].dot(qOffset, state.keyCache[curLayer], keyCacheOffset, headSize);
+*    	score /= sqrtHeadSize;
+*    	// save the score to the attention buffer
+*    	state.att[token].setFloat(attOffset + t, score);
+*   }
 */
 __global__ void qk_scores_grid(
     const uint8_t* __restrict__ Q, int qOffset,
@@ -604,11 +612,22 @@ __global__ void qk_scores_grid(
     float sqrtHeadSize = sqrtf(headSize);
     for (int t = 0; t <= position + token; t++) {
         int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
-        dotProduct(Q, qOffset, formatA, blockSizeA, typeSizeA, headerBytesA,
-            keyCache, keyCacheOffset, formatB, blockSizeB, typeSizeB, headerBytesB,
-            &out, headSize);
+        //dotProduct(Q, qOffset, formatA, blockSizeA, typeSizeA, headerBytesA,
+            //keyCache, keyCacheOffset, formatB, blockSizeB, typeSizeB, headerBytesB,
+            //&out, headSize);
+        //float result = 0f;
+        //for (int j = 0; j < size; j++) {
+        //    result += thiz.getFloat(thisOffset + j) * that.getFloat(thatOffset + j);
+        //}
+        //return result;
+        float sum = 0.0f;
+        for (int i = 0; i < headSize; ++i) {
+            float Aval = dquant(Q, qOffset + i, formatA, blockSizeA, typeSizeA, headerBytesA);
+            float Bval = dquant(keyCache, keyCacheOffset + i, formatB, blockSizeB, typeSizeB, headerBytesB);
+            sum += Aval * Bval;
+        }
         //printf("qk_scores_grid1=%f for t=%d\n", out, t);
-        float score = out / sqrtHeadSize;
+        float score = sum / sqrtHeadSize;
         reinterpret_cast<float*>(Att)[attOffset + t] = score;
         //printf("qk_scores_grid2=%f for t=%d\n", reinterpret_cast<float*>(Att)[attOffset + t], t);
     }
