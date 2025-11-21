@@ -203,9 +203,12 @@ EXPORT void launch_row_softmax_fp32(const float*, float*, int, int, int, int);
 
 EXPORT void launch_row_softmax_inplace_fp32(float*, int, int, int);
 
-EXPORT void launch_weighted_sum(uint8_t*, uint8_t*, const uint8_t*, int, int, int, int, int, int, int);
+EXPORT void launch_weighted_sum(uint8_t*, uint8_t*, uint8_t*, int, int, int, int, int, int, int, int);
 
 EXPORT float launch_cpu_scalar_Dot(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, int);
+
+EXPORT void launch_qkscores(uint8_t*, int, int, int, int, int, uint8_t*, int, int, int, int,
+    uint8_t*, int, int, int, int, int, int, int);
 
 EXPORT void cudaInit();
 
