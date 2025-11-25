@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cuda_fp16.h>
 #include <math.h>
+#include <float.h>
 #include <iostream>
 #include "com_neocoretechs_cublas_Gemm.h"
 // ---------- Error helpers ----------
@@ -24,52 +25,172 @@
 #define GOCHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); goto fail; } } while(0)
 #define CHECK_CUDA_ERROR(call) { cudaError_t err = call; if (err != cudaSuccess) {  fprintf(stderr, "CUDA error: %s, in file '%s', line %d\n",  cudaGetErrorString(err), __FILE__, __LINE__);  exit(EXIT_FAILURE); } }
+__global__
+void softmax_attention_kernel(
+    const float* Q, int qOffset, // M x d
+    const float* K, int kOffset, // N x d
+    const float* V, int vOffset, // N x d
+    float* output, int xbOffset,  // M x d state.xb[token]
+    float* score, int attOffset,    // M x N, att buffer
+    int M, // rows
+    int N, // columns
+    int position, int token, int h, int kvMul, int kvDim,
+    int headSize
+) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= M) return;
+    // Step 1: Compute dot products & scaling
+    ////int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
+    // Q at qOffset, and K at keyCacheOffset for headSize
+    // dotproduct and softmax from t = 0 to t = position + token + 1 for q at qOffset and K ant keyCacheOffset
+    float maxval = -1e20f;
+    for (int j = 0; j < N; ++j) {
+        float s = 0.0f;
+        for (int k = 0; k < headSize; ++k)
+            s += Q[qOffset + (row * headSize + k)] * K[kOffset + (j * headSize + k)]; //Q[row * d + k] * K[j * d + k];
+        float scaled = s / sqrtf((float)headSize);
+        score[row * N + j] = scaled;
+        if (scaled > maxval) maxval = scaled;
+    }
 
-// ---------- Row-wise softmax ----------
-__global__ void row_softmax_fp32(const float* __restrict__ S, float* __restrict__ A,
-    int rows, int cols, int ldS, int ldA) {
-    int r = blockIdx.x * blockDim.x + threadIdx.x;
-    if (r >= rows) return;
-    const float* srow = S + r * ldS;
-    float* arow = A + r * ldA;
-    // 1) max
-    float m = -1e30f;
-    for (int c = 0; c < cols; ++c) m = fmaxf(m, srow[c]);
-    // 2) exp and sum
-    float sum = 0.f;
-    for (int c = 0; c < cols; ++c) {
-        float e = __expf(srow[c] - m);
-        arow[c] = e;
+    // Step 2: Softmax
+    float sum = 0.0f;
+    for (int j = 0; j < N; ++j) {
+        float e = expf(score[row * N + j] - maxval);
+        score[row * N + j] = e;
         sum += e;
     }
-    // 3) normalize
-    float inv = 1.0f / sum;
-    for (int c = 0; c < cols; ++c) arow[c] *= inv;
-}
-/*
-* ldS is offset, not stride
-*/
-__global__ void row_softmax_inplace_fp32(float* __restrict__ S,
-    int rows, int cols, int ldS) {
-    int r = blockIdx.x * blockDim.x + threadIdx.x;
-    if (r >= rows) return;
-    float* srow = S + r + ldS;
-    // 1) max
-    float m = -1e30f;
-    for (int c = 0; c < cols; ++c) m = fmaxf(m, srow[c]);
-    // 2) exp and sum (overwrite in place)
-    float sum = 0.f;
-    for (int c = 0; c < cols; ++c) {
-        float e = __expf(srow[c] - m);
-        srow[c] = e;
-        sum += e;
+    for (int j = 0; j < N; ++j)
+        score[row * N + j] /= sum;
+
+    // Step 3: Weighted sum for output
+    for (int k = 0; k < headSize; ++k) {
+        float accum = 0.0f;
+        for (int j = 0; j < N; ++j)
+            accum += score[row * N + j] * V[vOffset + (j * headSize + k)];
+        output[attOffset +(row * headSize + k)] = accum;
     }
-    // 3) normalize
-    float inv = 1.0f / sum;
-    for (int c = 0; c < cols; ++c) srow[c] *= inv;
+}
+// ---------- Row-wise softmax ---------- 
+__inline__ __device__ float warp_reduce_max(float x) {
+    // Reduce max within a warp
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        float y = __shfl_down_sync(0xffffffff, x, offset);
+        x = fmaxf(x, y);
+    }
+    return x;
 }
 
+__inline__ __device__ float warp_reduce_sum(float x) {
+    // Reduce sum within a warp
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        x += __shfl_down_sync(0xffffffff, x, offset);
+    }
+    return x;
+}
 
+template<int WARPS>
+__device__ float block_reduce_max(float localMax) {
+    // Each warp produces a partial max; warp 0 reduces them
+    __shared__ float partial[WARPS];
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+
+    float wmax = warp_reduce_max(localMax);
+    if (lane == 0) partial[warp] = wmax;
+    __syncthreads();
+
+    float blockMax = -FLT_MAX;
+    if (warp == 0) {
+        float v = (lane < WARPS) ? partial[lane] : -FLT_MAX;
+        blockMax = warp_reduce_max(v);
+    }
+    // Broadcast blockMax to all threads
+    return __shfl_sync(0xffffffff, blockMax, 0);
+}
+
+template<int WARPS>
+__device__ float block_reduce_sum(float localSum) {
+    __shared__ float partial[WARPS];
+    int lane = threadIdx.x & 31;
+    int warp = threadIdx.x >> 5;
+
+    float wsum = warp_reduce_sum(localSum);
+    if (lane == 0) partial[warp] = wsum;
+    __syncthreads();
+
+    float blockSum = 0.f;
+    if (warp == 0) {
+        float v = (lane < WARPS) ? partial[lane] : 0.f;
+        blockSum = warp_reduce_sum(v);
+    }
+    return __shfl_sync(0xffffffff, blockSum, 0);
+}
+
+__global__ void softmax_inplace_heads(float* Att,
+    int contextLength,
+    int T,
+    int attOffset /* base for this row */) {
+    // Single-row variant: launch with grid=(1), block=128/256
+    float* row = Att + attOffset;
+    // Pass 1: max over [0..T-1]
+    float localMax = -FLT_MAX;
+    for (int i = threadIdx.x; i < T; i += blockDim.x)
+        localMax = fmaxf(localMax, row[i]);
+    __shared__ float smax;
+    // reduce (use warp reduce or shared reduction)
+    // ... (omitted for brevity, but keep it block-wide) ...
+    // Pass 2: exp and sum over [0..T-1]
+    float localSum = 0.f;
+    for (int i = threadIdx.x; i < T; i += blockDim.x) {
+        float v = expf(row[i] - smax);
+        row[i] = v;
+        localSum += v;
+    }
+    __shared__ float ssum;
+    // reduce localSum to ssum
+    // ...
+    // Pass 3: normalize [0..T-1]
+    float inv = 1.0f / ssum;
+    for (int i = threadIdx.x; i < T; i += blockDim.x)
+        row[i] *= inv;
+}
+__global__ void row_softmax_fp32(float * __restrict__ a, float * __restrict__ b, int w, int h) {
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (row < h && col < w) {
+        float maxval = a[row * w];
+        for (int i = 1; i < w; i++) {
+            maxval = fmaxf(maxval, a[row * w + i]);
+        }
+        float divisor = 0.f;
+        for (int i = 0; i < w; i++) {
+            divisor += __expf(a[row * w + i] - maxval);
+        }
+        b[row * w + col] = __expf(a[row * w + col] - maxval) / (divisor);
+    }
+}
+// CUDA kernel for Softmax over the last dimension
+__global__ void softmaxKernel(float* input, int rows, int cols, int stride) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < rows) {
+        // Find max value for numerical stability
+        float maxVal = -FLT_MAX;
+        for (int col = 0; col < cols; col++) {
+            maxVal = fmaxf(maxVal, input[row * stride + col]);
+        }
+        // Compute exponentials and sum
+        float sum = 0.0f;
+        for (int col = 0; col < cols; col++) {
+            input[row * stride + col] = expf(input[row * stride + col] - maxVal);
+            sum += input[row * stride + col];
+        }
+        // Normalize
+        for (int col = 0; col < cols; col++) {
+            input[row * stride + col] /= sum;
+        }
+    }
+}
 __device__ inline float getFloatDevice(const float* d_q, int index) {
     //const float* d_q = reinterpret_cast<const float*>(q);
     return *(d_q + index);
@@ -504,10 +625,10 @@ float* toDeviceFloatBF16(const uint8_t* h_src, size_t len, int typeSize) {
 /*
 * Call out to SoftMax kernel
 */
-static int softmax_rows_fp32(const float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
+static int softmax_rows_fp32(float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
     int threads = 128;
     int blocks = (rows + threads - 1) / threads;
-    row_softmax_fp32 << <blocks, threads, 0, stream >> > (d_S, d_A, rows, cols, ldS, ldA);
+    row_softmax_fp32 << <blocks, threads, 0, stream >> > (d_S, d_S, rows, 1);
     CHECK_CUDA(cudaGetLastError());
     return 0;
 }
@@ -621,7 +742,7 @@ __global__ void qk_scores_grid(
         //}
         //return result;
         float sum = 0.0f;
-        for (int i = 0; i < headSize; ++i) {
+        for (int i = 0; i < headSize; i++) {
             float Aval = dquant(Q, qOffset + i, formatA, blockSizeA, typeSizeA, headerBytesA);
             float Bval = dquant(keyCache, keyCacheOffset + i, formatB, blockSizeB, typeSizeB, headerBytesB);
             sum += Aval * Bval;
@@ -653,7 +774,7 @@ EXPORT void launch_weighted_sum(uint8_t* Att, uint8_t* xb, uint8_t* vCache, int 
 EXPORT void launch_qkscores(uint8_t* q, int qOffset, int formatA, int blockSizeA, int typeSizeA, int headerBlockA,
     uint8_t* keyCache, int formatB, int blockSizeB, int typeSizeB, int headerBlockB, 
     uint8_t* Att, int attOffset, 
-    int position, int token, int h, int headSize, int kvDim, int kvMul ) {
+    int position, int token, int h, int headSize, int numHeads, int contextLength, int kvDim, int kvMul ) {
     int threads = 1;
     int blocks = 1;
     //printf("%p %p %p %d %d %d %d %d %d\n", Att, xb, vCache, h, headSize, attOffset, xbOffset, kvDim, kvMul);
@@ -663,10 +784,31 @@ EXPORT void launch_qkscores(uint8_t* q, int qOffset, int formatA, int blockSizeA
     //state.att[token].softmaxInPlace(attOffset, position + token + 1);
     cudaDeviceSynchronize();
     NCHECK_CUDA(cudaGetLastError());
-    threads = 256;
-    row_softmax_inplace_fp32 << <blocks, threads >> > ((float*)Att, position + token + 1, 1, attOffset);
+    float* attRow = reinterpret_cast<float*>(Att)+attOffset;
+    /*dim3 block_size(32, 32, 1);
+    int grid_x = 1;
+    int grid_y = (position + token + 1 + 31) / 32; // round up
+    dim3 grid_size(grid_x, grid_y, 1);
+    float* buf;
+    cudaMalloc((void**)&buf, (position + token + 1) * sizeof(float));
+    row_softmax_fp32 << <grid_size, block_size >> > (attRow, buf, 1, position + token + 1);
     cudaDeviceSynchronize();
     NCHECK_CUDA(cudaGetLastError());
+    // If attRow is device memory:
+    cudaMemcpy(attRow, buf, (position + token + 1) * sizeof(float), cudaMemcpyDeviceToDevice);
+    cudaFree(buf);*/
+    int T = position + token + 1;          // active columns
+    int rows = numHeads;                    // one row per head
+    threads = 128;                      // or 256, tune as needed
+    dim3 grid(rows);
+    dim3 block(threads);
+    // Att must be a device pointer to float buffer of size numHeads * contextLength
+    softmax_inplace_heads << <grid, block >> > (reinterpret_cast<float*>(Att),
+        contextLength,
+        T, attOffset);
+    cudaDeviceSynchronize();
+    NCHECK_CUDA(cudaGetLastError());
+    //printf("position=%d token=%d attOffset=%d attRow len=%d \n", position, token, attOffset, (position + token + 1));
 }
 EXPORT float sdotSliceCuBLAS(uint64_t handle, const float* q, const float* k, int headSize) {
     float* dQ = NULL, * dK = NULL;
@@ -764,41 +906,6 @@ fail:
     return NAN;
 }
 
-uint64_t cublasHandle() {
-    cublasStatus_t status;
-    cublasHandle_t handle = NULL;
-    /* Initialize CUBLAS */
-    status = cublasCreate(&handle);
-    if (status != CUBLAS_STATUS_SUCCESS) {
-        printf("!!!!cublasCreate CUBLAS initialization error %s\n", cublasGetStatusString(status));
-        return NULL;
-    }
-    cudaStream_t stream;
-    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
-    cublasSetStream(handle, stream);
-    //cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
-    // once per handle
-    // cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
-    // For FP16 GEMMs, use CUDA_R_16F inputs + tensor ops kernels
-    // HOST mode means cuBLAS will synchronize the stream, write the value back into host memory, and only then return.
-    // cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
-    // Device mode in this context means:
-    // Keep data resident on the GPU as much as possible.
-    // Don’t malloc / free / copy every call — allocate once, reuse buffers, and only transfer when you must.
-    // Dequantize on device instead of staging on host.
-    // A device kernel runs in parallel, writing directly into.That way you skip the pinned host buffer and the extra PCIe copy.
-    // Fuse operations where possible.
-    // For example, a custom kernel could dequantize Q8 and accumulate the dot product against K in one pass, avoiding even the intermediate .
-    // Use cuBLAS / cuDNN primitives when they fit.
-    // already device mode — it never brings data back to host until you copy the scalar result.
-    //The kernel writes into that device buffer asynchronously, and you can copy it back later 
-    cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
-    printf("Created CUBLAS handle %x\n",handle);
-    return (uint64_t)handle;
-}
-void cublasHandleDestroy(uint64_t handle) {
-    cublasDestroy((cublasHandle_t) handle);
-}
 int cudaGetMemInfo(size_t* free, size_t* total) {
     CHECK_CUDA(cudaMemGetInfo(free, total));
     return 0;
@@ -831,14 +938,14 @@ extern "C" void launch_rmsnorm_fp32_rowmajor(uint8_t* qA, int indexA, int format
     free(host);*/
 }
 
-extern "C" void launch_row_softmax_fp32(const float* S, float* A, int rows, int cols, int ldS, int ldA) {
+extern "C" void launch_row_softmax_fp32(float* S, float* A, int rows, int cols, int ldS, int ldA) {
     int threads = 256;
-    row_softmax_fp32 << <1, threads >> > (S, A, rows, cols, ldS, ldA);
+    row_softmax_fp32 << <1, threads >> > (S, A, rows, cols);
     cudaDeviceSynchronize();
 }
 extern "C" void launch_row_softmax_inplace_fp32(float* S, int rows, int cols, int offset) {
     int threads = 256;
-    row_softmax_inplace_fp32 << <1, threads >> > (S, rows, cols, offset);
+    row_softmax_fp32 << <1, threads >> > (S+offset, S+offset, rows, cols);
     cudaDeviceSynchronize();
 }
 extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, uint64_t bytes) {
@@ -901,27 +1008,6 @@ __global__ void scaleKernel(float* A, float scale, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         A[idx] *= scale;
-    }
-}
-// CUDA kernel for Softmax over the last dimension
-__global__ void softmaxKernel(float* input, int rows, int cols, int stride) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < rows) {
-        // Find max value for numerical stability
-        float maxVal = -FLT_MAX;
-        for (int col = 0; col < cols; col++) {
-            maxVal = fmaxf(maxVal, input[row * stride + col]);
-        }
-        // Compute exponentials and sum
-        float sum = 0.0f;
-        for (int col = 0; col < cols; col++) {
-            input[row * stride + col] = expf(input[row * stride + col] - maxVal);
-            sum += input[row * stride + col];
-        }
-        // Normalize
-        for (int col = 0; col < cols; col++) {
-            input[row * stride + col] /= sum;
-        }
     }
 }
 

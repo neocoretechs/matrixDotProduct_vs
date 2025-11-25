@@ -52,6 +52,41 @@ float* toDeviceFloatBF16(const uint8_t*, size_t, int);
 
 timespec stop, start;
 
+uint64_t cublasHandle() {
+    cublasStatus_t status;
+    cublasHandle_t handle = NULL;
+    /* Initialize CUBLAS */
+    status = cublasCreate(&handle);
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        printf("!!!!cublasCreate CUBLAS initialization error %s\n", cublasGetStatusString(status));
+        return NULL;
+    }
+    cudaStream_t stream;
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+    cublasSetStream(handle, stream);
+    //cublasSetMathMode(handle, CUBLAS_TENSOR_OP_MATH);
+    // once per handle
+    // cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH);
+    // For FP16 GEMMs, use CUDA_R_16F inputs + tensor ops kernels
+    // HOST mode means cuBLAS will synchronize the stream, write the value back into host memory, and only then return.
+    // cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    // Device mode in this context means:
+    // Keep data resident on the GPU as much as possible.
+    // Don’t malloc / free / copy every call — allocate once, reuse buffers, and only transfer when you must.
+    // Dequantize on device instead of staging on host.
+    // A device kernel runs in parallel, writing directly into.That way you skip the pinned host buffer and the extra PCIe copy.
+    // Fuse operations where possible.
+    // For example, a custom kernel could dequantize Q8 and accumulate the dot product against K in one pass, avoiding even the intermediate .
+    // Use cuBLAS / cuDNN primitives when they fit.
+    // already device mode — it never brings data back to host until you copy the scalar result.
+    //The kernel writes into that device buffer asynchronously, and you can copy it back later 
+    cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST);
+    printf("Created CUBLAS handle %x\n", handle);
+    return (uint64_t)handle;
+}
+void cublasHandleDestroy(uint64_t handle) {
+    cublasDestroy((cublasHandle_t)handle);
+}
 /* Host implementation of a simple version of sgemm */
 static void simple_sgemm(int rows1, int cols1, int rows2, int cols2, const float* A, const float* B, float* C) {
     int i;
