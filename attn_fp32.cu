@@ -154,34 +154,6 @@ __global__ void normalize_softmax(float* data, float total, int size) {
     }
 }
 
-__global__ void softmax(float * __restrict__ a, float * __restrict__ b, int rows, int cols) {
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    if (row < rows && col < cols) {
-        float maxval = a[row * cols];
-        for (int i = 1; i < cols; i++) {
-            maxval = fmaxf(maxval, a[row * cols + i]);
-        }
-        float divisor = 0.f;
-        for (int i = 0; i < cols; i++) {
-            divisor += __expf(a[row * cols + i] - maxval);
-        }
-        b[row * cols + col] = __expf(a[row * cols + col] - maxval) / (divisor);
-    }
-}
-// CUDA kernel for Softmax over the last dimension
-__global__ void softmaxInplace(float* input, int rows, int cols, int stride) {
-        int row = blockIdx.x * blockDim.x + threadIdx.x;
-        printf("row=%d rows=%d\n", row, rows);
-        if (row < rows) {
-                float maxval = -FLT_MAX;
-                maxval = fmaxf(maxval, input[row]);
-                float divisor = 0.f;
-                divisor += __expf(input[row] - maxval);
-                input[row] = __expf(input[row] - maxval) / (divisor);
-                printf("input[%d]=%f\n", row, input[row]);
-        }
-}
 __device__ inline float getFloatDevice(const float* d_q, int index) {
     //const float* d_q = reinterpret_cast<const float*>(q);
     return *(d_q + index);
@@ -613,16 +585,6 @@ float* toDeviceFloatBF16(const uint8_t* h_src, size_t len, int typeSize) {
     PCHECK_CUDA(cudaFreeHost(h_stage));
     return d_out;
 }
-/*
-* Call out to SoftMax kernel
-*/
-static int softmax_rows_fp32(float* d_S, float* d_A, int rows, int cols, int ldS, int ldA, cudaStream_t stream) {
-    int threads = 128;
-    int blocks = (rows + threads - 1) / threads;
-    softmax << <blocks, threads, 0, stream >> > (d_S, d_A, rows, cols);
-    CHECK_CUDA(cudaGetLastError());
-    return 0;
-}
 
 __global__ void dotProductSetup(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* qB, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
@@ -784,7 +746,7 @@ EXPORT void launch_qkscores(uint8_t* q, int qOffset, int formatA, int blockSizeA
     float init_max = -FLT_MAX;
     NCHECK_CUDA(cudaMemcpy(d_max, &init_max, sizeof(float), cudaMemcpyHostToDevice));
     // First kernel call: Compute exponentials and find max
-    int threads_per_block = 256; // Adjust based on architecture
+    int threads_per_block = 64; // Adjust based on architecture
     blocks = (size + threads_per_block - 1) / threads_per_block;
     compute_exponentials_and_max << <blocks, threads_per_block, threads_per_block * sizeof(float) >> > (data, d_max, size);
     // Copy max back to host
@@ -799,7 +761,9 @@ EXPORT void launch_qkscores(uint8_t* q, int qOffset, int formatA, int blockSizeA
     NCHECK_CUDA(cudaMemcpy(&h_total, d_total, sizeof(float), cudaMemcpyDeviceToHost));
     // Normalize to get softmax probabilities
     normalize_softmax << <blocks, threads_per_block >> > (data, h_total, size);
-    cudaDeviceSynchronize();
+    NCHECK_CUDA(cudaDeviceSynchronize());
+    //NCHECK_CUDA(cudaFree(d_max));
+    //NCHECK_CUDA(cudaFree(d_total));
     NCHECK_CUDA(cudaGetLastError());
     //printf("position=%d token=%d attOffset=%d attRow len=%d \n", position, token, attOffset, (position + token + 1));
 }
@@ -931,15 +895,34 @@ extern "C" void launch_rmsnorm_fp32_rowmajor(uint8_t* qA, int indexA, int format
     free(host);*/
 }
 
-extern "C" void launch_row_softmax_fp32(float* S, float* A, int rows, int cols, int ldS, int ldA) {
-    int threads = 256;
-    softmax << <1, threads >> > (S, A, rows, cols);
+extern "C" void launch_row_softmax_inplace_fp32(uint8_t* q, int offset, int size) {
+    float* data = reinterpret_cast<float*>(q) + offset;
+    float* d_max, * d_total;
+    NCHECK_CUDA(cudaMalloc((void**)&d_max, sizeof(float)));
+    NCHECK_CUDA(cudaMalloc((void**)&d_total, sizeof(float)));
+    // Initialize d_max to a very small value
+    float init_max = -FLT_MAX;
+    NCHECK_CUDA(cudaMemcpy(d_max, &init_max, sizeof(float), cudaMemcpyHostToDevice));
+    // First kernel call: Compute exponentials and find max
+    int threads_per_block = 64; // Adjust based on architecture
+    int blocks = (size + threads_per_block - 1) / threads_per_block;
+    compute_exponentials_and_max << <blocks, threads_per_block, threads_per_block * sizeof(float) >> > (data, d_max, size);
+    // Copy max back to host
+    float h_max;
+    cudaMemcpy(&h_max, d_max, sizeof(float), cudaMemcpyDeviceToHost);
+    // Now compute the exponentials with the max value
+    compute_exponentials << <blocks, threads_per_block >> > (data, h_max, size);
+    // Compute total of exponentials
+    float h_total = 0.0f;
+    compute_total_exponentials << <blocks, threads_per_block, threads_per_block * sizeof(float) >> > (data, d_total, size);
+    // Copy total back to host
+    NCHECK_CUDA(cudaMemcpy(&h_total, d_total, sizeof(float), cudaMemcpyDeviceToHost));
+    // Normalize to get softmax probabilities
+    normalize_softmax << <blocks, threads_per_block >> > (data, h_total, size);
+    //cudaFree(d_max);
+    //cudaFree(d_total);
     cudaDeviceSynchronize();
-}
-extern "C" void launch_row_softmax_inplace_fp32(float* S, int rows, int cols, int offset) {
-    int threads = 256;
-    softmaxInplace << <1, threads >> > (S+offset,rows, cols, 1);
-    cudaDeviceSynchronize();
+    NCHECK_CUDA(cudaGetLastError());
 }
 extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, uint64_t bytes) {
     NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyHostToDevice));
