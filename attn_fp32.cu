@@ -592,6 +592,7 @@ __global__ void dotProductSetup(const uint8_t* qA, int indexA, int formatA, int 
     dotProduct(qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA,
         qB, indexB, formatB, blockSizeB, typeSizeB, headerBytesB,
         result, N);
+    //printf("dotProduct res=%f\n",*result);
 }
 #ifdef __cplusplus
 extern "C" {
