@@ -208,6 +208,8 @@ EXPORT float launch_cpu_scalar_Dot(const uint8_t*, int, int, int, int, int, cons
 EXPORT void launch_qkscores(uint8_t*, int, int, int, int, int, uint8_t*, int, int, int, int,
     uint8_t*, int, int, int, int, int, int, int, int, int);
 
+EXPORT void launch_rope(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, uint8_t*, uint8_t*, int, int, int, int, int);
+
 EXPORT void cudaInit();
 
 EXPORT void freeDevicePtr(uint64_t);

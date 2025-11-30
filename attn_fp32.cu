@@ -25,70 +25,22 @@
 #define GOCHECK_CUBLAS(x) do { cublasStatus_t st = (x); if (st != CUBLAS_STATUS_SUCCESS) { \
   fprintf(stderr, "cuBLAS error %s at %s:%d\n", cublasGetStatusString(st), __FILE__, __LINE__); goto fail; } } while(0)
 #define CHECK_CUDA_ERROR(call) { cudaError_t err = call; if (err != cudaSuccess) {  fprintf(stderr, "CUDA error: %s, in file '%s', line %d\n",  cudaGetErrorString(err), __FILE__, __LINE__);  exit(EXIT_FAILURE); } }
-__global__
-void softmax_attention_kernel(
-    const float* Q, int qOffset, // M x d
-    const float* K, int kOffset, // N x d
-    const float* V, int vOffset, // N x d
-    float* output, int xbOffset,  // M x d state.xb[token]
-    float* score, int attOffset,    // M x N, att buffer
-    int M, // rows
-    int N, // columns
-    int position, int token, int h, int kvMul, int kvDim,
-    int headSize
-) {
-    int row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= M) return;
-    // Step 1: Compute dot products & scaling
-    ////int keyCacheOffset = t * kvDim + (h / kvMul) * headSize;
-    // Q at qOffset, and K at keyCacheOffset for headSize
-    // dotproduct and softmax from t = 0 to t = position + token + 1 for q at qOffset and K ant keyCacheOffset
-    float maxval = -1e20f;
-    for (int j = 0; j < N; ++j) {
-        float s = 0.0f;
-        for (int k = 0; k < headSize; ++k)
-            s += Q[qOffset + (row * headSize + k)] * K[kOffset + (j * headSize + k)]; //Q[row * d + k] * K[j * d + k];
-        float scaled = s / sqrtf((float)headSize);
-        score[row * N + j] = scaled;
-        if (scaled > maxval) maxval = scaled;
-    }
 
-    // Step 2: Softmax
-    float sum = 0.0f;
-    for (int j = 0; j < N; ++j) {
-        float e = expf(score[row * N + j] - maxval);
-        score[row * N + j] = e;
-        sum += e;
-    }
-    for (int j = 0; j < N; ++j)
-        score[row * N + j] /= sum;
-
-    // Step 3: Weighted sum for output
-    for (int k = 0; k < headSize; ++k) {
-        float accum = 0.0f;
-        for (int j = 0; j < N; ++j)
-            accum += score[row * N + j] * V[vOffset + (j * headSize + k)];
-        output[attOffset +(row * headSize + k)] = accum;
-    }
-}
 __device__ float atomicMaxFloat(float* address, float val) {
     unsigned long long* address_as_ull = (unsigned long long*)address;
     unsigned long long old = *address_as_ull, assumed;
-
     // Keep going until successful
     do {
         if (__uint_as_float(old) >= val) return __uint_as_float(old);
         assumed = old;
         old = atomicCAS(address_as_ull, assumed, __float_as_uint(val));
     } while (assumed != old);
-
     return __uint_as_float(old);
 }
 
 __global__ void compute_exponentials_and_max(float* data, float* d_max, int size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     extern __shared__ float shared_data[];
-
     // Each thread stores its result in shared memory
     if (idx < size) {
         shared_data[threadIdx.x] = data[idx];
@@ -97,7 +49,6 @@ __global__ void compute_exponentials_and_max(float* data, float* d_max, int size
         shared_data[threadIdx.x] = -FLT_MAX; // Ensure unused threads don't affect max
     }
     __syncthreads();
-
     // Perform a parallel reduction to find the max value
     for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
         if (threadIdx.x < stride) {
@@ -105,7 +56,6 @@ __global__ void compute_exponentials_and_max(float* data, float* d_max, int size
         }
         __syncthreads();
     }
-
     // Write the max value for the block to the global max
     if (threadIdx.x == 0) {
         atomicMaxFloat(d_max, shared_data[0]);
@@ -123,7 +73,6 @@ __global__ void compute_exponentials(float* data, float max, int size) {
 __global__ void compute_total_exponentials(float* data, float* total, int size) {
     extern __shared__ float shared_data[];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
     // Each thread loads one element into shared memory
     if (idx < size) {
         shared_data[threadIdx.x] = data[idx];
@@ -132,7 +81,6 @@ __global__ void compute_total_exponentials(float* data, float* total, int size) 
         shared_data[threadIdx.x] = 0.0f;
     }
     __syncthreads();
-
     // Perform reduction to calculate the total sum
     for (int stride = blockDim.x / 2; stride > 0; stride /= 2) {
         if (threadIdx.x < stride) {
@@ -140,7 +88,6 @@ __global__ void compute_total_exponentials(float* data, float* total, int size) 
         }
         __syncthreads();
     }
-
     // Write the result for the block
     if (threadIdx.x == 0) {
         atomicAdd(total, shared_data[0]);
@@ -244,6 +191,34 @@ extern "C" __device__ float dquant(const uint8_t* q, int index, int format, int 
     case 4: return getFloatBF16Device(q, index, typeSize);
     default: return reinterpret_cast<const float*>(q)[index];
     }
+}
+__global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+    const uint8_t* d_imag, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
+    uint8_t* d_q, uint8_t* d_k, // state.q , state.k
+    int nTokens, int dim, int position, int headSize, int kvDim) {
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    float** fd_q = reinterpret_cast<float**>(d_q);
+    float** fd_k = reinterpret_cast<float**>(d_k);
+    float* vec = NULL;
+    // RoPE relative positional encoding: complex-valued rotate q and k in each head
+    // Parallel.parallelFor(0, nTokens, t -> { 
+    for (int t = 0; t < nTokens; t++)
+        for (int i = 0; i < dim; i += 2) {
+            int head_dim = i % headSize;
+            float fcr = dquant(d_real, indexA + (((position + t) * (headSize / 2) + (head_dim / 2)) * typeSizeA), formatA, blockSizeA, typeSizeA, headerBytesA);
+            float fci = dquant(d_imag, indexB + (((position + t) * (headSize / 2) + (head_dim / 2)) * typeSizeB), formatB, blockSizeB, typeSizeB, headerBytesB);
+            //float fcr = weights.freq_cis_real_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
+            //float fci = weights.freq_cis_imag_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
+            int rotn = i < kvDim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
+            for (int vi = 0; vi < rotn; vi++) {
+                vec = (vi == 0 ? fd_q[t] : fd_k[t]); // the vector to rotate (query or key)
+                float v0 = vec[i];
+                float v1 = vec[i + 1];
+                vec[i] = v0 * fcr - v1 * fci;
+                vec[i + 1] = v0 * fci + v1 * fcr;
+            }
+        }
+    //});  
 }
 /*
 * 64 thread shared temp
@@ -925,6 +900,19 @@ extern "C" void launch_row_softmax_inplace_fp32(uint8_t* q, int offset, int size
     cudaDeviceSynchronize();
     NCHECK_CUDA(cudaGetLastError());
 }
+extern "C" void launch_rope(const uint8_t* d_real, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
+    const uint8_t* d_imag, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
+    uint8_t* d_q, uint8_t* d_k, // state.q , state.k
+    int nTokens, int dim, int position, int headSize, int kvDim) {
+    int threads = 1;
+    int blocks = 1;
+    //printf("%p %p %p %d %d %d %d %d %d\n", Att, xb, vCache, h, headSize, attOffset, xbOffset, kvDim, kvMul);
+    rope << <blocks, threads >> > (d_real, indexA, formatA, blockSizeA, typeSizeA, headerBytesA, 
+        d_imag, indexB, formatB, blockSizeB, typeSizeB, headerBytesB, d_q, d_k, nTokens, dim, position, headSize, kvDim);
+    cudaDeviceSynchronize();
+    NCHECK_CUDA(cudaGetLastError());
+}
+
 extern "C" void copyHostToDevice(uint8_t* tensor, uint64_t d_tensor, uint64_t bytes) {
     NCHECK_CUDA(cudaMemcpy((uint8_t*)d_tensor, tensor, bytes, cudaMemcpyHostToDevice));
 }
