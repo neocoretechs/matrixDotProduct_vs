@@ -197,8 +197,6 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
     uint8_t* d_q, uint8_t* d_k, // state.q , state.k
     int nTokens, int dim, int position, int headSize, int kvDim) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
-    float** fd_q = reinterpret_cast<float**>(d_q);
-    float** fd_k = reinterpret_cast<float**>(d_k);
     float* vec = NULL;
     // RoPE relative positional encoding: complex-valued rotate q and k in each head
     // Parallel.parallelFor(0, nTokens, t -> { 
@@ -211,7 +209,14 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
             //float fci = weights.freq_cis_imag_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
             int rotn = i < kvDim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
             for (int vi = 0; vi < rotn; vi++) {
-                vec = (vi == 0 ? fd_q[t] : fd_k[t]); // the vector to rotate (query or key)
+                //vec = (vi == 0 ? d_q[t] : d_k[t]); // the vector to rotate (query or key)
+                // Load the actual device pointers for this token
+                if (vi == 0) {
+                    vec = reinterpret_cast<float*>(d_q[t]);
+                }
+                else {
+                    vec = reinterpret_cast<float*>(d_k[t]);
+                }
                 float v0 = vec[i];
                 float v1 = vec[i + 1];
                 vec[i] = v0 * fcr - v1 * fci;
