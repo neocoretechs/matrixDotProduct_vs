@@ -198,6 +198,8 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
     int nTokens, int dim, int position, int headSize, int kvDim) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     float* vec = NULL;
+    float** fd_q;
+    float** fd_k;
     // RoPE relative positional encoding: complex-valued rotate q and k in each head
     // Parallel.parallelFor(0, nTokens, t -> { 
     for (int t = 0; t < nTokens; t++)
@@ -207,23 +209,29 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
             float fci = dquant(d_imag, indexB + (((position + t) * (headSize / 2) + (head_dim / 2)) * typeSizeB), formatB, blockSizeB, typeSizeB, headerBytesB);
             //float fcr = weights.freq_cis_real_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
             //float fci = weights.freq_cis_imag_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
+            //printf("RoPE fcr=%f fci=%f \n", fcr, fci);
             int rotn = i < kvDim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
             for (int vi = 0; vi < rotn; vi++) {
                 //vec = (vi == 0 ? d_q[t] : d_k[t]); // the vector to rotate (query or key)
                 // Load the actual device pointers for this token
                 if (vi == 0) {
-                    vec = reinterpret_cast<float*>(d_q[t]);
+                   fd_q = reinterpret_cast<float**>(d_q);
+                   vec = fd_q[t];
                 }
                 else {
-                    vec = reinterpret_cast<float*>(d_k[t]);
+                    fd_k = reinterpret_cast<float**>(d_k);
+                    vec = fd_k[t];
                 }
-                float v0 = vec[i];
-                float v1 = vec[i + 1];
-                vec[i] = v0 * fcr - v1 * fci;
-                vec[i + 1] = v0 * fci + v1 * fcr;
+                float v0 = *(vec + i);
+                float v1 = *(vec + i + 1);
+                //printf("RoPE v0=%f v1=%f \n", v0, v1);
+                *(vec + i) = v0 * fcr - v1 * fci;
+                *(vec + i + 1) = v0 * fci + v1 * fcr;
             }
         }
-    //});  
+    //});
+    //for (int i = 0; i < dim; i++)
+        //printf("RoPE vec[%d]=%f\n", i,*(vec+i));
 }
 /*
 * 64 thread shared temp
@@ -911,7 +919,7 @@ extern "C" void launch_rope(const uint8_t* d_real, int indexA, int formatA, int 
     int nTokens, int dim, int position, int headSize, int kvDim) {
     int threads = 1;
     int blocks = 1;
-    //printf("%p %p %p %d %d %d %d %d %d\n", Att, xb, vCache, h, headSize, attOffset, xbOffset, kvDim, kvMul);
+    //printf("RoPE %p %p %p %p %d %d %d %d %d\n", d_real, d_imag, d_q, d_k, nTokens, dim, position, headSize, kvDim);
     rope << <blocks, threads >> > (d_real, indexA, formatA, blockSizeA, typeSizeA, headerBytesA, 
         d_imag, indexB, formatB, blockSizeB, typeSizeB, headerBytesB, d_q, d_k, nTokens, dim, position, headSize, kvDim);
     cudaDeviceSynchronize();
