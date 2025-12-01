@@ -106,21 +106,9 @@ __device__ inline float getFloatDevice(const float* d_q, int index) {
     return *(d_q + index);
 }
 __device__ inline float getFloatQ8Device(const uint8_t* d_q, int index, int blockSize, int typeSize, int headerBytes) {
-    // const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
-    uint8_t* h_q = nullptr;
-    //uint16_t* s_q = nullptr;
     int blockIndex = index / blockSize;
     int withinBlockIndex = index % blockSize;
     int blockOffset = blockIndex * typeSize;
-    // read byte
-    //h_q = (d_q + blockOffset + headerBytes + withinBlockIndex);
-    // read short
-    //s_q = (uint16_t*)(d_q + blockOffset);
-    //int8_t quant = (int8_t)*h_q;
-    //float scale = __half2float(__ushort_as_half(*s_q));
-    //printf("GPU index=%d quant=%d scale=%f\n",index, quant, scale);
-    //return ((float)quant) * scale;
-    // alternate load -- uint16_t scaleBits = (uint16_t)(d_q + blockOffset) | ((uint16_t)(d_q + blockOffset + 1) << 8);
     const uint16_t* s_q = reinterpret_cast<const uint16_t*>(d_q + blockOffset);
     float scale = __half2float(__ushort_as_half(*s_q));
     // Payload starts after headerBytes
@@ -306,6 +294,11 @@ __global__ void simpleDotProduct(
     }
     *result = sum;
 }
+__global__ void getfloat(
+    const uint8_t* __restrict__ qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA, float* __restrict__ result) {
+    *result = dquant(qA, indexA, formatA, blockSizeA, typeSizeA, headerBytesA);
+}
+
 // Kernel function for inner-product-based matrix multiplication
 __global__ void innerProductKernel(const uint8_t* __restrict__ A, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
     const uint8_t* __restrict__ B, int indexB, int formatB, int blockSizeB, int typeSizeB, int headerBytesB,
@@ -375,37 +368,6 @@ extern "C" __global__ void matmul(const uint8_t* thiz, int indexA, int formatA, 
         reinterpret_cast<float*>(out)[i] = result;
     }
 }
-static inline float halfToFloat(uint16_t h) {
-    uint16_t h_exp = (h & 0x7C00u);
-    uint16_t h_sig = (h & 0x03FFu);
-    uint32_t f_sgn = ((uint32_t)h & 0x8000u) << 16;
-    uint32_t f_exp, f_sig;
-    if (h_exp == 0) {
-        if (h_sig == 0) {
-            f_exp = 0;
-            f_sig = 0;
-        } else {
-            // subnormal
-            f_exp = (127 - 15 + 1) << 23;
-            while ((h_sig & 0x0400u) == 0) {
-                h_sig <<= 1;
-                f_exp -= 1 << 23;
-            }
-            h_sig &= 0x03FFu;
-            f_sig = (uint32_t)h_sig << 13;
-        }
-    } else if (h_exp == 0x7C00u) {
-        f_exp = 0xFFu << 23;
-        f_sig = (uint32_t)h_sig << 13;
-    } else {
-        f_exp = ((h_exp >> 10) + (127 - 15)) << 23;
-        f_sig = (uint32_t)h_sig << 13;
-    }
-    uint32_t f_bits = f_sgn | f_exp | f_sig;
-    float f;
-    memcpy(&f, &f_bits, sizeof(f));
-    return f;
-}
 
 extern "C" __global__
 void rmsnorm_fp32_rowmajor(const uint8_t* x, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
@@ -437,166 +399,6 @@ void rmsnorm_fp32_rowmajor(const uint8_t* x, int indexA, int formatA, int blockS
             reinterpret_cast<float*>(out)[i] = dquant(weight + (i*typeSizeB), indexB, formatB, blockSizeB, typeSizeB, headerBytesB) /*weight[i]*/ *
                 (inv * dquant(x + (i*typeSizeA), indexA, formatA, blockSizeA, typeSizeA, headerBytesA));// (inv * x[i]);
         }
-}
-// CPU conversion for Q8_0
-std::vector<float> convertQ8ToFloat(const uint8_t* input, size_t len, int blockSize = 32, int headerBytes = 2) {
-    int typeSize = blockSize + headerBytes;
-    size_t blocks = len / typeSize;
-    std::vector<float> out(blocks * blockSize);
-    size_t pos = 0;
-    for (int b = 0; b < blocks; b++) {
-        int blockIndex = b / blockSize;
-        int withinBlockIndex = b % blockSize;
-        int blockOffset = blockIndex * typeSize;
-        int8_t quant = *(int8_t*)&input[blockOffset + headerBytes + withinBlockIndex];
-        uint16_t bits = (uint16_t)input[blockOffset] | ((uint16_t)input[blockOffset + 1] << 8);
-        float scale = halfToFloat(bits);
-        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
-        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
-        out.push_back((float)quant * scale);
-    }
-    return out;
-}
-// Convert and push Q8 buffer directly to device, return pointer to device buffer
-float* toDeviceFloatQ8(const uint8_t* q, size_t headSize, int index, int blockSize, int typeSize, int headerBytes) {
-    float* dQ = NULL;
-    size_t bytes = (size_t)headSize * sizeof(float);
-    cudaError_t ce;
-    ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
-
-    //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
-    float* h_stage = NULL;
-    ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
-    //int blockIndex = index / GGMLType.Q8_0.getBlockSize();
-    //int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
-    //int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
-    //byte quant = readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
-    //float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
-    //return quant * scale;
-    size_t pos = 0;
-    for (int b = index; b < (index + headSize); b++) {
-        int blockIndex = b / blockSize;
-        int withinBlockIndex = b % blockSize;
-        int blockOffset = blockIndex * typeSize;
-        int8_t quant = *(int8_t*)&q[blockOffset + headerBytes + withinBlockIndex];
-        uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
-        float scale = halfToFloat(bits);
-        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
-        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
-        h_stage[pos++] = (float)quant * scale;
-    }
-    ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
-    GOCHECK_CUDA(cudaFree(dQ)); GOCHECK_CUDA(cudaFreeHost(h_stage));
-    return dQ;
-fail:
-    if (dQ) cudaFree(dQ);
-    return NULL;
-}
-// Convert and push Q4 buffer directly to device, return pointer to device buffer
-float* toDeviceFloatQ4(const uint8_t * h_src, size_t len, int blockSize, int typeSize, int headerBytes) {
-    int blocks = int(len / typeSize);
-    size_t totalElems = size_t(blocks) * size_t(blockSize);
-    size_t outBytes = totalElems * sizeof(float);
-    // Try device alloc
-    float* d_out = nullptr;
-    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
-    // CPU decode into pinned host staging
-    float* h_stage = nullptr;
-    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
-    if (ce != cudaSuccess) {
-        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
-        h_stage = (float*)malloc(outBytes); // fallback
-        if (!h_stage) {
-            std::cerr << "Fallback malloc failed\n";
-            cudaFree(d_out);
-            exit(1);
-        }
-    }
-    size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
-        // half->float (use a robust helper)
-        float scale = halfToFloat(bits);
-        for (int i = 0; i < blockSize; ++i) {
-            int modIndex = i % blockSize;
-            int8_t q;
-            if (modIndex < blockSize / 2)
-                // Load quantized value (signed 8‑bit here)
-                q = *(int8_t*)&h_src[base + headerBytes + modIndex] & 0x0F;
-            else
-                q = (int8_t)((*(int8_t*)&h_src[base + headerBytes + modIndex - blockSize / 2] >> 4) & 0x0F);
-            h_stage[pos++] = (float)q * scale;
-        }
-    }
-    // Upload once
-    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
-    PCHECK_CUDA(cudaFreeHost(h_stage));
-    return d_out;
-}
-// Convert and push F16 buffer directly to device, return pointer to device buffer
-float* toDeviceFloatF16(const uint8_t* h_src, size_t len, int typeSize) {
-    int blocks = int(len / typeSize);
-    size_t totalElems = size_t(blocks);
-    size_t outBytes = totalElems * sizeof(float);
-    // Try device alloc
-    float* d_out = nullptr;
-    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
-    // CPU decode into pinned host staging
-    float* h_stage = nullptr;
-    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
-    if (ce != cudaSuccess) {
-        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
-        h_stage = (float*)malloc(outBytes); // fallback
-        if (!h_stage) {
-            std::cerr << "Fallback malloc failed\n";
-            cudaFree(d_out);
-            exit(1);
-        }
-    }
-    size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
-        // half->float (use a robust helper)
-        h_stage[pos++] = halfToFloat(bits);
-    }
-    // Upload once
-    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
-    PCHECK_CUDA(cudaFreeHost(h_stage));
-    return d_out;
-}
-// Convert and push BF16 buffer directly to device, return pointer to device buffer
-float* toDeviceFloatBF16(const uint8_t* h_src, size_t len, int typeSize) {
-    int blocks = int(len / typeSize);
-    size_t totalElems = size_t(blocks);
-    size_t outBytes = totalElems * sizeof(float);
-    // Try device alloc
-    float* d_out = nullptr;
-    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
-    // CPU decode into pinned host staging
-    float* h_stage = nullptr;
-    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
-    if (ce != cudaSuccess) {
-        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
-        h_stage = (float*)malloc(outBytes); // fallback
-        if (!h_stage) {
-            std::cerr << "Fallback malloc failed\n";
-            cudaFree(d_out);
-            exit(1);
-        }
-    }
-    size_t pos = 0;
-    for (int b = 0; b < blocks; ++b) {
-        size_t base = size_t(b) * size_t(typeSize);
-        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
-        // half->float (use a robust helper)
-        h_stage[pos++] = ((uint32_t)bits) << 16;
-    }
-    // Upload once
-    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
-    PCHECK_CUDA(cudaFreeHost(h_stage));
-    return d_out;
 }
 
 __global__ void dotProductSetup(const uint8_t* qA, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA,
@@ -833,32 +635,18 @@ EXPORT float launch_cpu_scalar_Dot(const uint8_t* d_q, int indexA, int formatA, 
     //cudaFreeHost(h_k);
 }
 
-EXPORT float getFloat(const uint64_t q, int index) {
-    const float* d_q = reinterpret_cast<const float*>(q);
-    float value = 0.0f;
-    NCHECK_CUDA(cudaMemcpy(&value, d_q + index, sizeof(float), cudaMemcpyDeviceToHost));
-    return value;
-}
-
-EXPORT float getFloatQ8(const uint64_t q, int index,
-    int blockSize, int typeSize, int headerBytes) {
-    const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
-    int blockIndex = index / blockSize;
-    int withinBlockIndex = index % blockSize;
-    int blockOffset = blockIndex * typeSize;
-    uint8_t h_quant;
-    uint16_t h_scale;
-    // read quantized byte
-    NCHECK_CUDA(cudaMemcpy(&h_quant,
-        d_q + blockOffset + headerBytes + withinBlockIndex,
-        sizeof(uint8_t), cudaMemcpyDeviceToHost));
-    // read scale (stored as half at start of block)
-    NCHECK_CUDA(cudaMemcpy(&h_scale,
-        d_q + blockOffset,
-        sizeof(uint16_t), cudaMemcpyDeviceToHost));
-    int8_t quant = static_cast<int8_t>(h_quant);
-    float scale = halfToFloat(h_scale);
-    return static_cast<float>(quant) * scale;
+EXPORT float getFloat(uint8_t* dq, int indexA, int formatA, int blockSizeA, int typeSizeA, int headerBytesA) {
+    float result_host = 0.0f;
+    float* d_result = nullptr;
+    NCHECK_CUDA(cudaMalloc(&d_result, sizeof(float)));
+    NCHECK_CUDA(cudaMemset(d_result, 0, sizeof(float)));
+    getfloat << <1, 1 >> > (dq, indexA, formatA, blockSizeA, typeSizeA, headerBytesA, d_result);
+    NCHECK_CUDA(cudaGetLastError());
+    NCHECK_CUDA(cudaDeviceSynchronize());
+    NCHECK_CUDA(cudaMemcpy(&result_host, d_result, sizeof(float), cudaMemcpyDeviceToHost));
+    NCHECK_CUDA(cudaFree(d_result));
+    //printf("getFloat dq=%p result=%f .\n", dq, result_host);
+    return result_host;
 }
 /*
 * Scalar dot routines working on quantized device buffers

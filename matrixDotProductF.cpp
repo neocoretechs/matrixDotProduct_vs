@@ -39,6 +39,14 @@
 #include <vector>
 
 #include "com_neocoretechs_cublas_Gemm.h"
+#include <iostream>
+#define GOCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
+  fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); goto fail; } } while(0)
+#define PCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
+  fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); return nullptr; } } while(0)
+#define NCHECK_CUDA(x) do { cudaError_t err = (x); if (err != cudaSuccess) { \
+  fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(err), __FILE__, __LINE__); } } while(0)
+
 float* toDeviceFloatQ8(const uint8_t*, size_t, int, int, int, int);
 float* toDeviceFloatQ4(const uint8_t*, size_t, int, int, int);
 float* toDeviceFloatF16(const uint8_t*, size_t, int);
@@ -102,6 +110,248 @@ static void simple_sgemm(int rows1, int cols1, int rows2, int cols2, const float
             C[j * rows1 + i] = prod;// alpha* prod + beta * C[j * rows1 + i];
         }
     }
+}
+static inline float halfToFloat(uint16_t h) {
+    uint16_t h_exp = (h & 0x7C00u);
+    uint16_t h_sig = (h & 0x03FFu);
+    uint32_t f_sgn = ((uint32_t)h & 0x8000u) << 16;
+    uint32_t f_exp, f_sig;
+    if (h_exp == 0) {
+        if (h_sig == 0) {
+            f_exp = 0;
+            f_sig = 0;
+        }
+        else {
+            // subnormal
+            f_exp = (127 - 15 + 1) << 23;
+            while ((h_sig & 0x0400u) == 0) {
+                h_sig <<= 1;
+                f_exp -= 1 << 23;
+            }
+            h_sig &= 0x03FFu;
+            f_sig = (uint32_t)h_sig << 13;
+        }
+    }
+    else if (h_exp == 0x7C00u) {
+        f_exp = 0xFFu << 23;
+        f_sig = (uint32_t)h_sig << 13;
+    }
+    else {
+        f_exp = ((h_exp >> 10) + (127 - 15)) << 23;
+        f_sig = (uint32_t)h_sig << 13;
+    }
+    uint32_t f_bits = f_sgn | f_exp | f_sig;
+    float f;
+    memcpy(&f, &f_bits, sizeof(f));
+    return f;
+}
+static inline float htof(half h) {
+    uint16_t* p = (uint16_t*)(&h);
+    uint32_t fval = 0;
+    fval |= (*p & 0x8000) << 16;				// sign
+    uint32_t mant = *p & 0x03ff;
+    uint32_t exp = (*p & 0x7c00) >> 10;			// exponential
+    if (exp == 0x1f) {							// NaN or Infinity
+        fval |= mant ? 0x7fc00000 : 0x7f800000;
+    }
+    else
+        if (exp > 0) {							// normalized
+            fval |= (exp + 0x70) << 23;
+            if (mant != 0) {
+                fval |= mant << 13;
+            }
+        }
+        else
+            if (mant != 0) {						// denormarlized
+                for (int i = 9; i >= 0; i--) {
+                    if (mant & (1 << i)) {
+                        fval |= ((0x67 + i) << 23) | ((mant << (23 - i)) & 0x7fffff);
+                        break;
+                    }
+                }
+            }
+    return *((float*)&fval);
+}
+EXPORT float getFloatQ8(const uint64_t q, int index,
+    int blockSize, int typeSize, int headerBytes) {
+    const uint8_t* d_q = reinterpret_cast<const uint8_t*>(q);
+    int blockIndex = index / blockSize;
+    int withinBlockIndex = index % blockSize;
+    int blockOffset = blockIndex * typeSize;
+    uint8_t h_quant;
+    uint16_t h_scale;
+    // read quantized byte
+    NCHECK_CUDA(cudaMemcpy(&h_quant,
+        d_q + blockOffset + headerBytes + withinBlockIndex,
+        sizeof(uint8_t), cudaMemcpyDeviceToHost));
+    // read scale (stored as half at start of block)
+    NCHECK_CUDA(cudaMemcpy(&h_scale,
+        d_q + blockOffset,
+        sizeof(uint16_t), cudaMemcpyDeviceToHost));
+    int8_t quant = static_cast<int8_t>(h_quant);
+    float scale = halfToFloat(h_scale);
+    return static_cast<float>(quant) * scale;
+}
+// CPU conversion for Q8_0
+std::vector<float> convertQ8ToFloat(const uint8_t* input, size_t len, int blockSize = 32, int headerBytes = 2) {
+    int typeSize = blockSize + headerBytes;
+    size_t blocks = len / typeSize;
+    std::vector<float> out(blocks * blockSize);
+    size_t pos = 0;
+    for (int b = 0; b < blocks; b++) {
+        int blockIndex = b / blockSize;
+        int withinBlockIndex = b % blockSize;
+        int blockOffset = blockIndex * typeSize;
+        int8_t quant = *(int8_t*)&input[blockOffset + headerBytes + withinBlockIndex];
+        uint16_t bits = (uint16_t)input[blockOffset] | ((uint16_t)input[blockOffset + 1] << 8);
+        float scale = halfToFloat(bits);
+        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
+        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
+        out.push_back((float)quant * scale);
+    }
+    return out;
+}
+// Convert and push Q4 buffer directly to device, return pointer to device buffer
+float* toDeviceFloatQ4(const uint8_t * h_src, size_t len, int blockSize, int typeSize, int headerBytes) {
+    int blocks = int(len / typeSize);
+    size_t totalElems = size_t(blocks) * size_t(blockSize);
+    size_t outBytes = totalElems * sizeof(float);
+    // Try device alloc
+    float* d_out = nullptr;
+    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
+    // CPU decode into pinned host staging
+    float* h_stage = nullptr;
+    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
+    if (ce != cudaSuccess) {
+        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
+        h_stage = (float*)malloc(outBytes); // fallback
+        if (!h_stage) {
+            std::cerr << "Fallback malloc failed\n";
+            cudaFree(d_out);
+            exit(1);
+        }
+    }
+    size_t pos = 0;
+    for (int b = 0; b < blocks; ++b) {
+        size_t base = size_t(b) * size_t(typeSize);
+        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
+        // half->float (use a robust helper)
+        float scale = halfToFloat(bits);
+        for (int i = 0; i < blockSize; ++i) {
+            int modIndex = i % blockSize;
+            int8_t q;
+            if (modIndex < blockSize / 2)
+                // Load quantized value (signed 8‑bit here)
+                q = *(int8_t*)&h_src[base + headerBytes + modIndex] & 0x0F;
+            else
+                q = (int8_t)((*(int8_t*)&h_src[base + headerBytes + modIndex - blockSize / 2] >> 4) & 0x0F);
+            h_stage[pos++] = (float)q * scale;
+        }
+    }
+    // Upload once
+    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
+    PCHECK_CUDA(cudaFreeHost(h_stage));
+    return d_out;
+}
+// Convert and push F16 buffer directly to device, return pointer to device buffer
+float* toDeviceFloatF16(const uint8_t * h_src, size_t len, int typeSize) {
+    int blocks = int(len / typeSize);
+    size_t totalElems = size_t(blocks);
+    size_t outBytes = totalElems * sizeof(float);
+    // Try device alloc
+    float* d_out = nullptr;
+    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
+    // CPU decode into pinned host staging
+    float* h_stage = nullptr;
+    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
+    if (ce != cudaSuccess) {
+        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
+        h_stage = (float*)malloc(outBytes); // fallback
+        if (!h_stage) {
+            std::cerr << "Fallback malloc failed\n";
+            cudaFree(d_out);
+            exit(1);
+        }
+    }
+    size_t pos = 0;
+    for (int b = 0; b < blocks; ++b) {
+        size_t base = size_t(b) * size_t(typeSize);
+        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
+        // half->float (use a robust helper)
+        h_stage[pos++] = halfToFloat(bits);
+    }
+    // Upload once
+    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
+    PCHECK_CUDA(cudaFreeHost(h_stage));
+    return d_out;
+}
+// Convert and push BF16 buffer directly to device, return pointer to device buffer
+float* toDeviceFloatBF16(const uint8_t * h_src, size_t len, int typeSize) {
+    int blocks = int(len / typeSize);
+    size_t totalElems = size_t(blocks);
+    size_t outBytes = totalElems * sizeof(float);
+    // Try device alloc
+    float* d_out = nullptr;
+    PCHECK_CUDA(cudaMalloc((void**)&d_out, outBytes));
+    // CPU decode into pinned host staging
+    float* h_stage = nullptr;
+    cudaError_t ce = cudaHostAlloc((void**)&h_stage, outBytes, cudaHostAllocDefault);
+    if (ce != cudaSuccess) {
+        std::cerr << "Pinned host alloc failed: " << cudaGetErrorString(ce) << "\n";
+        h_stage = (float*)malloc(outBytes); // fallback
+        if (!h_stage) {
+            std::cerr << "Fallback malloc failed\n";
+            cudaFree(d_out);
+            exit(1);
+        }
+    }
+    size_t pos = 0;
+    for (int b = 0; b < blocks; ++b) {
+        size_t base = size_t(b) * size_t(typeSize);
+        uint16_t bits = (uint16_t)h_src[base] | ((uint16_t)h_src[base + 1] << 8);
+        // half->float (use a robust helper)
+        h_stage[pos++] = ((uint32_t)bits) << 16;
+    }
+    // Upload once
+    PCHECK_CUDA(cudaMemcpy(d_out, h_stage, outBytes, cudaMemcpyHostToDevice));
+    PCHECK_CUDA(cudaFreeHost(h_stage));
+    return d_out;
+}
+
+// Convert and push Q8 buffer directly to device, return pointer to device buffer
+float* toDeviceFloatQ8(const uint8_t* q, size_t headSize, int index, int blockSize, int typeSize, int headerBytes) {
+    float* dQ = NULL;
+    size_t bytes = (size_t)headSize * sizeof(float);
+    cudaError_t ce;
+    ce = cudaMalloc((void**)&dQ, bytes); GOCHECK_CUDA(ce);
+
+    //ce = cudaMemcpy(dQ, q, bytes, cudaMemcpyHostToDevice); if (ce) goto fail;
+    float* h_stage = NULL;
+    ce = cudaMallocHost((void**)&h_stage, bytes); GOCHECK_CUDA(ce);
+    //int blockIndex = index / GGMLType.Q8_0.getBlockSize();
+    //int withinBlockIndex = index % GGMLType.Q8_0.getBlockSize();
+    //int blockOffset = blockIndex * GGMLType.Q8_0.getTypeSize();
+    //byte quant = readByte(memorySegment, blockOffset + GGMLType.FLOAT16_BYTES + withinBlockIndex);
+    //float scale = Float.float16ToFloat(readShort(memorySegment, blockOffset));
+    //return quant * scale;
+    size_t pos = 0;
+    for (int b = index; b < (index + headSize); b++) {
+        int blockIndex = b / blockSize;
+        int withinBlockIndex = b % blockSize;
+        int blockOffset = blockIndex * typeSize;
+        int8_t quant = *(int8_t*)&q[blockOffset + headerBytes + withinBlockIndex];
+        uint16_t bits = (uint16_t)q[blockOffset] | ((uint16_t)q[blockOffset + 1] << 8);
+        float scale = halfToFloat(bits);
+        //printf("b=%d blockIndex=%d quant=%d bits=%d scale=%.6f raw:%02x%02x bits:%04x\n",
+        //   b, blockIndex, quant, bits, scale, q[blockOffset], q[blockOffset + 1], bits);
+        h_stage[pos++] = (float)quant * scale;
+    }
+    ce = cudaMemcpy(dQ, h_stage, bytes, cudaMemcpyHostToDevice); GOCHECK_CUDA(ce);
+    GOCHECK_CUDA(cudaFree(dQ)); GOCHECK_CUDA(cudaFreeHost(h_stage));
+    return dQ;
+fail:
+    if (dQ) cudaFree(dQ);
+    return NULL;
 }
 
 JNIEXPORT jlong JNICALL Java_com_neocoretechs_cublas_Gemm_cublasHandle(JNIEnv* env, jclass clazz) {
