@@ -198,28 +198,35 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
     int nTokens, int dim, int position, int headSize, int kvDim) {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
     float* vec = NULL;
-    float** fd_q;
-    float** fd_k;
+    float** fd_q = reinterpret_cast<float**>(d_q);
+    float** fd_k = reinterpret_cast<float**>(d_k);
     // RoPE relative positional encoding: complex-valued rotate q and k in each head
     // Parallel.parallelFor(0, nTokens, t -> { 
-    for (int t = 0; t < nTokens; t++)
-        for (int i = 0; i < dim; i += 2) {
+    for (int t = 0; t < nTokens; t++) {
+        // Pair safety: ensure we always have i+1 in-bounds
+        // dim and headSize should both be even; if not, clamp last pair
+        const int last = dim - (dim & 1 ? 1 : 0);
+        for (int i = 0; i < last; i += 2) {
             int head_dim = i % headSize;
-            float fcr = dquant(d_real, indexA + (((position + t) * (headSize / 2) + (head_dim / 2)) * typeSizeA), formatA, blockSizeA, typeSizeA, headerBytesA);
-            float fci = dquant(d_imag, indexB + (((position + t) * (headSize / 2) + (head_dim / 2)) * typeSizeB), formatB, blockSizeB, typeSizeB, headerBytesB);
+            // Rotary span: use a clear local bound for rotation per head
+            const int rotaryDim = headSize;
+            if (head_dim >= rotaryDim) 
+                continue; // do not rotate beyond span
+            // Frequency index tied to local pair within head
+            const int freqIndex = (position + t) * (rotaryDim / 2) + (head_dim / 2);
+            float fcr = dquant(d_real, indexA + freqIndex * typeSizeA, formatA, blockSizeA, typeSizeA, headerBytesA);
+            float fci = dquant(d_imag, indexB + freqIndex * typeSizeB, formatB, blockSizeB, typeSizeB, headerBytesB);
             //float fcr = weights.freq_cis_real_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
             //float fci = weights.freq_cis_imag_dev.getFloat((position + t) * (headSize / 2) + (head_dim / 2));
             //printf("RoPE fcr=%f fci=%f \n", fcr, fci);
+            /*
             int rotn = i < kvDim ? 2 : 1; // how many vectors? 2 = q & k, 1 = q only
             for (int vi = 0; vi < rotn; vi++) {
                 //vec = (vi == 0 ? d_q[t] : d_k[t]); // the vector to rotate (query or key)
                 // Load the actual device pointers for this token
                 if (vi == 0) {
-                   fd_q = reinterpret_cast<float**>(d_q);
-                   vec = fd_q[t];
-                }
-                else {
-                    fd_k = reinterpret_cast<float**>(d_k);
+                    vec = fd_q[t];
+                } else {
                     vec = fd_k[t];
                 }
                 float v0 = *(vec + i);
@@ -228,7 +235,25 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
                 *(vec + i) = v0 * fcr - v1 * fci;
                 *(vec + i + 1) = v0 * fci + v1 * fcr;
             }
+            */
+            // Rotate q
+            vec = fd_q[t];
+            float v0 = *(vec + i);
+            float v1 = *(vec + i + 1);
+            //printf("RoPE v0=%f v1=%f \n", v0, v1);
+            *(vec + i) = v0 * fcr - v1 * fci;
+            *(vec + i + 1) = v0 * fci + v1 * fcr;
+            // Rotate k only within its rotary span
+            if (head_dim < kvDim) {
+                vec = fd_k[t];
+                float v0 = *(vec + i);
+                float v1 = *(vec + i + 1);
+                //printf("RoPE v0=%f v1=%f \n", v0, v1);
+                *(vec + i) = v0 * fcr - v1 * fci;
+                *(vec + i + 1) = v0 * fci + v1 * fcr;
+            }
         }
+    }
     //});
     //for (int i = 0; i < dim; i++)
         //printf("RoPE vec[%d]=%f\n", i,*(vec+i));
