@@ -214,6 +214,8 @@ EXPORT void launch_rope(const uint8_t*, int, int, int, int, int, const uint8_t*,
 
 EXPORT void cudaInit();
 
+EXPORT void load_model(uint8_t*);
+
 EXPORT void run_model(uint8_t*);
 
 EXPORT void freeDevicePtr(uint64_t);
