@@ -189,7 +189,6 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
     float** fd_q = reinterpret_cast<float**>(d_q);
     float** fd_k = reinterpret_cast<float**>(d_k);
     // RoPE relative positional encoding: complex-valued rotate q and k in each head
-    // Parallel.parallelFor(0, nTokens, t -> { 
     for (int t = 0; t < nTokens; t++) {
         // Pair safety: ensure we always have i+1 in-bounds
         // dim and headSize should both be even; if not, clamp last pair
@@ -226,23 +225,26 @@ __global__ void rope(const uint8_t* d_real, int indexA, int formatA, int blockSi
             */
             // Rotate q
             vec = fd_q[t];
-            float v0 = *(vec + i);
-            float v1 = *(vec + i + 1);
-            //printf("RoPE v0=%f v1=%f \n", v0, v1);
-            *(vec + i) = v0 * fcr - v1 * fci;
-            *(vec + i + 1) = v0 * fci + v1 * fcr;
+            float v0 = vec[i];
+            float v1 = vec[ i + 1];
+            float v0x = v0 * fcr - v1 * fci;
+            float v0x1 = v0 * fci + v1 * fcr;
+            //printf("RoPE q[%d] j=%d v0=%f v1=%f \n",t, i, v0x, v0x1);
+            vec[i] = v0x;
+            vec[i + 1] = v0x1;
             // Rotate k only within its rotary span
             if (head_dim < kvDim) {
                 vec = fd_k[t];
-                float v0 = *(vec + i);
-                float v1 = *(vec + i + 1);
-                //printf("RoPE v0=%f v1=%f \n", v0, v1);
-                *(vec + i) = v0 * fcr - v1 * fci;
-                *(vec + i + 1) = v0 * fci + v1 * fcr;
+                float v0 = vec[i];
+                float v1 = vec[i + 1];
+                float v0y = v0 * fcr - v1 * fci;
+                float v0y1 = v0 * fci + v1 * fcr;
+               // printf("RoPE k[%d] j=%d v0=%f v1=%f \n",t, i, v0y, v0y1);
+                vec[i] = v0y;
+                vec[i + 1] = v0y1;
             }
         }
     }
-    //});
     //for (int i = 0; i < dim; i++)
         //printf("RoPE vec[%d]=%f\n", i,*(vec+i));
 }
@@ -801,7 +803,10 @@ __global__ void scaleKernel(float* A, float scale, int size) {
         A[idx] *= scale;
     }
 }
-
+extern "C" void copyFromNative(uint8_t* tensor, uint64_t bytes) {
+    char* data = reinterpret_cast<char*>(tensor);
+    strncpy(data, "this is a test", bytes);
+}
 #ifdef __cplusplus
 }
 #endif

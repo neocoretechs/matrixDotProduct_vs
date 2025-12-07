@@ -197,6 +197,8 @@ EXPORT void copyHostToDevice(uint8_t*, uint64_t, uint64_t);
 
 EXPORT void copyDeviceToHost(uint64_t, uint8_t*, uint64_t);
 
+EXPORT void copyFromNative(uint8_t*, uint64_t);
+
 EXPORT void launch_rmsnorm_fp32_rowmajor(uint8_t*, int, int, int, int, int, uint8_t*, int, int, int, int, int, uint8_t*, int, float);
 
 EXPORT void launch_row_softmax_inplace_fp32(uint8_t*, int, int);
@@ -211,6 +213,8 @@ EXPORT void launch_qkscores(uint8_t*, int, int, int, int, int, uint8_t*, int, in
 EXPORT void launch_rope(const uint8_t*, int, int, int, int, int, const uint8_t*, int, int, int, int, int, uint8_t*, uint8_t*, int, int, int, int, int);
 
 EXPORT void cudaInit();
+
+EXPORT void run_model(uint8_t*);
 
 EXPORT void freeDevicePtr(uint64_t);
 #ifdef __cplusplus
