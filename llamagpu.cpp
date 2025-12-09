@@ -35,7 +35,7 @@ static llama_model* model;
 static const llama_vocab* vocab;
 static llama_context* ctx;
 
-EXPORT void load_model(uint8_t* modelp) {
+EXPORT void load_model(uint8_t* modelp, int context_size) {
      char* model_path = reinterpret_cast<char*>(modelp);
      model_params = llama_model_default_params();
      model = llama_model_load_from_file(model_path, model_params);
@@ -47,29 +47,26 @@ EXPORT void load_model(uint8_t* modelp) {
      vocab = llama_model_get_vocab(model);
      // Initialize context once here
      llama_context_params ctx_params = llama_context_default_params();
-     ctx_params.n_ctx = 2048; // ensure enough room for prompt + generation
+     ctx_params.n_ctx = context_size; // ensure enough room for prompt + generation
      ctx = llama_init_from_model(model, ctx_params);
 }
 
-EXPORT void run_model(uint8_t* modelp) {
+EXPORT int run_model(uint8_t* modelp, float temp, uint8_t* retTokens) {
      char* model_prompt = reinterpret_cast<char*>(modelp);
+     int* return_tokens = reinterpret_cast<int*>(retTokens);
+     int return_token_cnt = 0;
      std::string prompt(model_prompt);
-     int n_predict = 32; // Number of tokens to predict
      // initialize the sampler
      llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
      llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
-     llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
+     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
      llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
      std::string response;
-
      int n_prompt = -llama_tokenize(vocab, prompt.c_str(), prompt.size(), NULL, 0, true, true);
      std::vector<llama_token> prompt_tokens(n_prompt);
      llama_tokenize(vocab, prompt.c_str(), prompt.size(), prompt_tokens.data(), prompt_tokens.size(), true, true);
-     //ctx_params.n_ctx = n_prompt + n_predict - 1;
      // Generate tokens
-     //
-     // Feed prompt
-      // prepare a batch for the prompt
+     // prepare a batch for the prompt
      llama_batch batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
      llama_token new_token_id;
      while (true) {
@@ -79,15 +76,16 @@ EXPORT void run_model(uint8_t* modelp) {
          if (n_ctx_used + batch.n_tokens > n_ctx) {
              printf("\033[0m\n");
              fprintf(stderr, "context size exceeded\n");
-             exit(0);
+             return -1;
          }
          int ret = llama_decode(ctx, batch);
          if (ret != 0) {
              printf("failed to decode, ret = %d\n", ret);
-             exit(0);
+             return -1;
          }
          // sample the next token
          new_token_id = llama_sampler_sample(smpl, ctx, -1);
+         return_tokens[return_token_cnt++] = new_token_id;
          // is it an end of generation?
          if (llama_vocab_is_eog(vocab, new_token_id)) {
              break;
@@ -97,7 +95,7 @@ EXPORT void run_model(uint8_t* modelp) {
          int n = llama_token_to_piece(vocab, new_token_id, buf, sizeof(buf), 0, true);
          if (n < 0) {
              printf("failed to convert token to piece\n");
-             exit(0);
+             return -1;
          }
          std::string piece(buf, n);
          printf("%s", piece.c_str());
@@ -109,8 +107,8 @@ EXPORT void run_model(uint8_t* modelp) {
      llama_sampler_free(smpl);
      //llama_free(ctx);
      //llama_model_free(model);
-     printf("exiting %zd tokens\n", prompt_tokens.size());
-     return;
+     printf("exiting %zd tokens %d return tokens\n", prompt_tokens.size(), return_token_cnt);
+     return return_token_cnt;
     }
 #ifdef __cplusplus
 }
