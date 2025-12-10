@@ -216,7 +216,13 @@ EXPORT void cudaInit();
 
 EXPORT void load_model(uint8_t*, int);
 
-EXPORT int run_model(uint8_t*, float, uint8_t*);
+EXPORT int run_model(uint8_t*, float, float, float, uint8_t*);
+
+EXPORT int run_model_tokenize(uint8_t*, float, float, float, uint8_t*);
+
+EXPORT int string_to_token(uint8_t*, uint8_t*);
+
+EXPORT int token_to_string(uint8_t*, int size, uint8_t*);
 
 EXPORT void freeDevicePtr(uint64_t);
 #ifdef __cplusplus
