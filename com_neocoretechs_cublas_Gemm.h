@@ -224,6 +224,16 @@ EXPORT int string_to_token(uint8_t*, uint8_t*);
 
 EXPORT int token_to_string(uint8_t*, int size, uint8_t*);
 
+EXPORT int apply_chat_template(uint8_t* chatl, size_t, bool, uint8_t*, int32_t);
+
+EXPORT void reset_context();
+
+EXPORT int get_token_bos();
+
+EXPORT int get_token_eos();
+
+EXPORT int get_token_eot();
+
 EXPORT void freeDevicePtr(uint64_t);
 #ifdef __cplusplus
 }
