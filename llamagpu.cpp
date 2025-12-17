@@ -207,14 +207,16 @@ EXPORT int token_to_string(uint8_t* intokens, int size, uint8_t* retString) {
     // Return number of characters written (excluding null terminator)
     return static_cast<int>(text.size());
 }
+
 EXPORT int apply_chat_template(uint8_t* chatl,
     size_t n_msg, // total number of llama_chat messages
     bool add_ass, // add assistant after interactions
     uint8_t* bufl, // 2 * number of chars in all messages. holds output
-    int32_t len) { // size of unallocated buffer
+    int len) { // size of unallocated buffer
     llama_chat_message* chat = reinterpret_cast<llama_chat_message*>(chatl);
     char* buf = reinterpret_cast<char*>(bufl);
-    return llama_chat_apply_template(nullptr, chat, n_msg, add_ass, buf, len);
+    //printf("default template=%s\n",llama_model_chat_template(model, NULL));
+    return llama_chat_apply_template(llama_model_chat_template(model, NULL), chat, n_msg, add_ass, buf, len);
 }
 EXPORT void reset_context() {
     llama_free(ctx);

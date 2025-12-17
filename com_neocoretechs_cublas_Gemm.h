@@ -224,7 +224,7 @@ EXPORT int string_to_token(uint8_t*, uint8_t*);
 
 EXPORT int token_to_string(uint8_t*, int size, uint8_t*);
 
-EXPORT int apply_chat_template(uint8_t* chatl, size_t, bool, uint8_t*, int32_t);
+EXPORT int apply_chat_template(uint8_t*, size_t, bool, uint8_t*, int);
 
 EXPORT void reset_context();
 
