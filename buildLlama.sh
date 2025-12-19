@@ -1,0 +1,25 @@
+/usr/local/cuda-11.4/bin/nvcc \
+    -std=c++17 \
+    -ccbin gcc \
+    -x cu \
+    -I./ \
+    -I../../../Common \
+    -I/usr/local/cuda-11.4/include \
+    -I/usr/lib/jvm/jdk-25/include \
+    -I/usr/lib/jvm/jdk-25/include/linux \
+    -I/home/jg/llama.cpp/include \
+    -I/home/jg/llama.cpp/ggml/include \
+    -I/home/jg/llama.cpp/common \
+    -I/home/jg/llama.cpp/vendor \
+    --keep-dir matrixDotProduct/aarch64/Release \
+    -maxrregcount=0 \
+    --machine 64 \
+    --compile \
+    -cudart shared \
+    -gencode arch=compute_87,code=sm_87 \
+    -gencode arch=compute_87,code=compute_87 \
+    -DLLAMA_CUBLAS=ON \
+    -O3 \
+    -Xcompiler -fPIC \
+    -o /home/jg/matrixDotProduct/matrixDotProduct/aarch64/Release/llamagpu.o \
+    /home/jg/matrixDotProduct/llamagpu.cpp
